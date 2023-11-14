@@ -1,0 +1,840 @@
+---
+title: "LIA_MIA_analysis"
+author: "Yuyan Xu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+```
+
+# Source functions
+```{r}
+source('Source/Setup.R')
+source('Source/ReadData.R')
+source('Source/Functions.R')
+```
+
+##### Inspect missingness
+```{r}
+df_covar %>% 
+  select(id, quic_total, pss_total, ds_total, sparse_income_num) %>% 
+  summarize_all(~ sum(is.na(.))) %>% glimpse()
+```
+
+##### questionnaire correlations
+```{r echo=FALSE, message=FALSE}
+# create correlation data frame
+vars = c('quic_total', 'sparse_income_num', 'fus_total', 'conflict_total', 'pss_total', 'ds_total')
+df_correlation <- df_covar %>% select(all_of(vars)) %>% mutate_at(all_of(vars), ~(scale(.) %>% as.vector)) 
+cor <- rcorr(as.matrix(df_correlation, method = "pearson", use = "pairwise.complete.obs", adjust = 'holm'))
+cor$P[is.na(cor$P)] <- 0
+corrplot(cor$r, type="upper", order="original", p.mat = cor$P, sig.level = 0.05, insig = "blank")
+```
+
+# GNG TASK
+## prep data
+cue (index.html line 263-275):  
+0 = go to win  
+1 = no go to win  
+2 = go to maintain  
+3 = no go to maintain  
+```{r echo=FALSE, message=FALSE}
+# select variables to standardize
+vars <- c('quic_total', 'conflict_total', 'ds_total', 'sparse_income_num', 'pss_total')
+
+##################### long data #####################
+df_gng_glmm <- left_join(gng_long, df_covar, by = 'id') %>% 
+  # rename(harsh = conflict_total, standard_score = ds_total) %>% 
+  mutate(go_str = factor(go_nogo, levels=0:1, labels=c("no go", "go")),
+         go_strR = relevel(go_str, ref = "go"), # relevel the reference level to "go" 
+         val_str = factor(win_maintain, levels=0:1, labels=c("negative", "positive")),
+         val_strR = relevel(val_str, ref = "positive"), # relevel the reference level to "positive" 
+         nonswitch = factor(nonswitch, levels=0:1, labels=c("switch", "no switch")),
+         phase = if_else(trial_num < 16, "first half", "second half") %>% as.factor,
+         trial_num0 = trial_num - 1) %>% 
+  filter_at(c('quic_total', 'ds_total', 'sparse_income_num'), all_vars(!is.na(.))) %>%
+  mutate_at(vars, ~(scale(.) %>% as.vector)) 
+
+paste("GNG task total N: ", n_distinct(gng_long$id))
+paste0("GNG task N after removing incomplete data in predicting variables ('quic_total', 'ds_total', 'sparse_income_num'): ", n_distinct(df_gng_glmm$id))
+```
+
+## covariates
+```{r include=FALSE}
+covariates = "ds_total + sparse_income_num + pss_total"
+```
+
+### run_models_fun
+```{r}
+run_models_fun <- function(data, covariates, model_setup) {
+  for (i in 1:nrow(model_setup)) {
+    mod_name <- model_setup[i, "mod_name"]
+    response <- model_setup[i, "response"]
+    key_var <- model_setup[i, "key_var"]
+    random_structure <- model_setup[i, "random_structure"]
+    
+    predictors = c(key_var, covariates, random_structure)
+    mod <- model_fun(response, predictors, data)
+    
+    assign(mod_name, mod, envir = .GlobalEnv)
+    saveRDS(get(mod_name), file.path(EXP_hr_dir, paste0("models/", mod_name, ".rds")))
+  }
+}
+```
+
+## Across the entire task
+### DV: Go
+#### does unpredictability bias children's Go/NoGo response?
+```{r}
+random_structure = "(1 + trial_num0| id)"
+predictors = c("quic_total*trial_num0", covariates, random_structure)
+mod1 <- model_fun("go", predictors, df_gng_glmm)
+saveRDS(mod1, file.path(gng_dir, "models/mod1.rds"))
+
+# # trial3 as a quadratic term
+# random_structure = "(1 + poly(trial3,2,raw=FALSE)| id)"
+# predictors = c("quic_total*poly(trial3,2,raw=FALSE)", covariates, random_structure)
+# mod1_poly <- model_fun("go", predictors, df_gng_glmm)
+# saveRDS(mod1_poly, file.path(gng_dir, "models/mod1_poly.rds"))
+
+### note: with this sample size (n =54) cannot add in the polynomial term because the model won't converge.
+### how to add in polynomial term to an interaction model? referred to this source: https://stackoverflow.com/questions/47372262/r-interactions-between-independent-variable-and-polynomial-term
+```
+
+```{r}
+mod1 <- readRDS(file.path(gng_dir, "models/mod1.rds"))
+summary(mod1)
+
+# # drop the polynomial term because that is not significant over and beyond the linear term
+# mod1_poly <- readRDS(file.path(gng_dir, "models/mod1_poly.rds"))
+# summary(mod1_poly)
+
+(plot_model(mod1, type="emm",
+            terms=c("trial_num0 [all]", "quic_total [-1, 1]"), 
+            title = "MIA_go_quic_total*trial_num0",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_quic_total*trial_num0.png"), width = 15, height = 10, units = "cm")
+```
+
+```{r}
+# multiple comparison for interaction
+# contrast 1
+emmeans(mod1, pairwise ~ quic_total|trial_num0,  
+        at = list(quic_total = c(-1, 1),
+                  trial_num0 = c(0, 14, 29)))
+# contrast 2
+emmeans(mod1, pairwise ~ trial_num0|quic_total,  
+        at = list(quic_total = c(-1, 1),
+                  trial_num0 = c(0, 14, 29)))
+```
+
+
+#### whether the learning of **go and nogo cues** vary with unpredictability?
+```{r}
+# reference level: "no go"
+random_structure = "(1 + go_str + trial3| id)"
+predictors = c("go_str*quic_total*trial3", covariates, random_structure)
+mod2 <- model_fun("go", predictors, df_gng_glmm)
+saveRDS(mod2, file.path(gng_dir, "models/mod2.rds"))
+
+# reference level: "go"
+random_structure = "(1 + go_strR + trial3| id)"
+predictors = c("go_strR*quic_total*trial3", covariates, random_structure)
+mod2_ref_go <- model_fun("go", predictors, df_gng_glmm)
+saveRDS(mod2_ref_go, file.path(gng_dir, "models/mod2_ref_go.rds"))
+```
+
+```{r}
+mod2 <- readRDS(file.path(gng_dir, "models/mod2.rds"))
+summary(mod2)
+# sjPlot::tab_model(mod2)
+
+mod2_ref_go <- readRDS(file.path(gng_dir, "models/mod2_ref_go.rds"))
+summary(mod2_ref_go)
+# sjPlot::tab_model(mod2_ref_go)
+
+(plot_model(mod2, type="emm",
+            terms=c("quic_total [all]", "go_str", "trial3 [3, 15, 30]"), 
+            title = "MIA_go_go_str*quic_total*trial3",
+            axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_go_str*quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+```
+
+```{r}
+# multiple comparison for interaction
+# contrast 1
+emmeans(mod2, pairwise ~ quic_total|trial3, by = "go_str", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+# contrast 2
+emmeans(mod2, pairwise ~ trial3|quic_total, by = "go_str", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+# contrast 3
+emmeans(mod2, pairwise ~ trial3|go_str, by = "quic_total", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+# contrast 4
+emmeans(mod2, pairwise ~ go_str|quic_total, by = "trial3", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+```
+
+#### whether the learning of **Pos and Neg feedback** vary with unpredictability?
+```{r}
+# reference level: "negative"
+random_structure = "(1 + val_str + trial3| id)"
+predictors = c("val_str*quic_total*trial3", covariates, random_structure)
+mod2_val <- model_fun("go", predictors, df_gng_glmm)
+saveRDS(mod2_val, file.path(gng_dir, "models/mod2_val.rds"))
+
+# reference level: "positive"
+random_structure = "(1 + val_strR + trial3| id)"
+predictors = c("val_strR*quic_total*trial3", covariates, random_structure)
+mod2_val_ref_positive <- model_fun("go", predictors, df_gng_glmm)
+saveRDS(mod2_val_ref_positive, file.path(gng_dir, "models/mod2_val_ref_positive.rds"))
+```
+
+```{r}
+mod2_val <- readRDS(file.path(gng_dir, "models/mod2_val.rds"))
+summary(mod2_val)
+# sjPlot::tab_model(mod2_val)
+
+mod2_val_ref_positive <- readRDS(file.path(gng_dir, "models/mod2_val_ref_positive.rds"))
+summary(mod2_val_ref_positive)
+# sjPlot::tab_model(mod2_val_ref_positive)
+
+(plot_model(mod2_val, type="emm",
+            terms=c("quic_total",  "val_str", "trial3 [3, 15, 30]"),
+            title = "MIA_go_val_str*quic_total*trial_num_3int",
+            axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1))
+ggsave(filename = file.path(plots_dir,"MIA_go_val_str*quic_total*trial_num_3int.png"), width = 15, height = 10, units = "cm")
+
+(plot_model(mod2_val, type="emm",
+            terms=c("quic_total [all]", "val_str"), # adding [all] makes the plot end right at the maximum value of x-axis
+            title = "MIA_go_val_str*quic_total*trial_num_2int",
+            axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_val_str*quic_total*trial_num_2int.png"), width = 15, height = 10, units = "cm")
+```
+
+```{r}
+# multiple comparison for interaction
+# contrast 1
+emmeans(mod2_val, pairwise ~ quic_total|trial3, by = "val_str", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+# contrast 2
+emmeans(mod2_val, pairwise ~ val_str|quic_total, by = "trial3", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+# contrast 3
+emmeans(mod2_val, pairwise ~ trial3|val_str, by = "quic_total", 
+        at = list(quic_total = c(-1, 1),
+                  trial3 = c(3, 15, 30)))
+```
+
+#### results by cue types
+##### Go for positive trials
+```{r}
+data = subset(df_gng_glmm, cue == 0)
+random_structure = "(1 + trial3| id)"
+
+predictors = c("quic_total*trial3", covariates, random_structure)
+mod2_0 <- model_fun("go", predictors, data)
+saveRDS(mod2_0, file.path(gng_dir, "models/mod2_0.rds"))
+```
+
+```{r}
+mod2_0 <- readRDS(file.path(gng_dir, "models/mod2_0.rds"))
+summary(mod2_0)
+# sjPlot::tab_model(mod2_0)
+
+(plot_model(mod2_0, type="eff",
+            terms=c("trial3", "quic_total [-1, 1]"), 
+            title = "MIA_go_cue0_quic_total*trial3",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_cue0_quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+```
+
+##### NoGo for positive trials
+```{r}
+data = subset(df_gng_glmm, cue == 1)
+random_structure = "(1 + trial3| id)"
+
+predictors = c("quic_total*trial3", covariates, random_structure)
+mod2_1 <- model_fun("go", predictors, data)
+saveRDS(mod2_1, file.path(gng_dir, "models/mod2_1.rds"))
+```
+
+```{r}
+mod2_1 <- readRDS(file.path(gng_dir, "models/mod2_1.rds"))
+summary(mod2_1)
+# sjPlot::tab_model(mod2_1)
+
+(plot_model(mod2_1, type="eff",
+            terms=c("trial3", "quic_total [-1, 1]"), 
+            title = "MIA_go_cue1_quic_total*trial3.png",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_cue1_quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+```
+
+##### Go to avoid negative trials
+```{r}
+data = subset(df_gng_glmm, cue == 2)
+random_structure = "(1 + trial3| id)"
+
+predictors = c("quic_total*trial3", covariates, random_structure)
+mod2_2 <- model_fun("go", predictors, data)
+saveRDS(mod2_2, file.path(gng_dir, "models/mod2_2.rds"))
+```
+
+```{r}
+mod2_2 <- readRDS(file.path(gng_dir, "models/mod2_2.rds"))
+summary(mod2_2)
+# sjPlot::tab_model(mod2_2)
+
+(plot_model(mod2_2, type="eff",
+            terms=c("trial3", "quic_total [-1, 1]"), 
+            title = "MIA_go_cue2_quic_total*trial3.png",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_cue2_quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+```
+
+##### NoGo to avoid negative trials
+```{r}
+data = subset(df_gng_glmm, cue == 3)
+random_structure = "(1 + trial3| id)"
+
+predictors = c("quic_total*trial3", covariates, random_structure)
+mod2_3 <- model_fun("go", predictors, data)
+saveRDS(mod2_3, file.path(gng_dir, "models/mod2_3.rds"))
+```
+
+```{r}
+mod2_3 <- readRDS(file.path(gng_dir, "models/mod2_3.rds"))
+summary(mod2_3)
+# sjPlot::tab_model(mod2_3)
+
+(plot_model(mod2_3, type="eff",
+            terms=c("trial3", "quic_total [-1, 1]"), 
+            title = "MIA_go_cue3_quic_total*trial3.png",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_go_cue3_quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+```
+
+#### read in models
+```{r}
+# Make a vector of all your file paths
+file_paths <- list.files(path = file.path(gng_dir, "models"), pattern = "\\.rds", full.names = TRUE)
+
+# Make a vector of file names
+file_names <-  gsub(pattern = "\\.rds$", replacement = "", x = basename(file_paths))
+
+# Read all your data into a list
+data_list <- lapply(file_paths, readRDS)
+
+# Assign file names to list elements
+names(data_list) <- file_names      
+```
+
+#### summarize models
+```{r}
+tidy_mod_fun <- function(model_list) {
+  for (i in (1:length(model_list))) {
+    name <- names(model_list)[[i]]
+    mod <- model_list[[i]]
+    
+    if (class(mod) == "glmerMod") {
+      table <- mod %>% tidy(conf.int = TRUE, exp = TRUE) 
+    } else {
+      table <- mod %>% tidy(conf.int = TRUE)
+    }
+    
+    table <- table %>% mutate(name = name)
+    
+    summary <- bind_rows(summary, table)
+  }
+  return(summary)
+}
+
+summary <- tibble()
+summary <- tidy_mod_fun(data_list) %>% 
+  filter(!is.na(std.error)) %>% 
+  select(-c(effect, group)) %>% 
+  filter(str_detect(term, "quic_total"))
+write_csv(summary, file.path(gng_dir, "MIA_model_summary.csv"))
+```
+
+### DV: Correct
+##### does unpredictability bias children's accuracy?
+The model where trial_num0 is a quadratic term (quadratic learning curve) has a lower AIC (prefer goodness of fit) but larger BIC (prefer simpler models), and has a significant p-value in the chi-square test, suggesting that it provides a better model-fit but at the same time is not parsimonious (might be over fitting the current data). Be cautious about this trade-off.
+```{r eval=FALSE}
+# trial_num0 as a linear term (linear learning curve)
+random_structure = "(1 + trial_num0| id)"
+predictors = c("quic_total*trial_num0", covariates, random_structure)
+mod1_correct <- model_fun("correct", predictors, df_gng_glmm)
+saveRDS(mod1_correct, file.path(gng_dir, "models/mod1_correct.rds"))
+
+# trial_num0 as a quadratic term (quadratic learning curve)
+random_structure = "(1 + poly(trial_num0,2,raw=FALSE)| id)"
+predictors = c("quic_total*poly(trial_num0,2,raw=FALSE)", covariates, random_structure)
+mod1_correct_poly <- model_fun("correct", predictors, df_gng_glmm)
+saveRDS(mod1_correct_poly, file.path(gng_dir, "models/mod1_correct_poly.rds"))
+```
+
+```{r eval=FALSE}
+mod1_correct <- readRDS(file.path(gng_dir, "models/mod1_correct.rds"))
+summary(mod1_correct)
+# sjPlot::tab_model(mod1_correct)
+
+mod1_correct_poly <- readRDS(file.path(gng_dir, "models/mod1_correct_poly.rds"))
+summary(mod1_correct_poly)
+# sjPlot::tab_model(mod1_correct_poly)
+
+anova(mod1_correct, mod1_correct_poly)
+
+(plot_model(mod1_correct, type="emm",
+            terms=c("trial_num0 [all]"), 
+            title = "MIA_correct_quic_total*trial_num0",
+            axis.title = c("Trial Number", "Accuracy"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_correct_quic_total*trial_num0.png"), width = 15, height = 10, units = "cm")
+
+(plot_model(mod1_correct_poly, type="emm",
+            terms=c("trial_num0 [all]"), 
+            title = "MIA_correct_quic_total*trial_num0^2",
+            axis.title = c("Trial Number", "Accuracy"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_correct_poly_quic_total*trial_num0^2.png"), width = 15, height = 10, units = "cm")
+```
+
+#### whether the accuracy for **go and nogo cues** vary with unpredictability?
+The model where trial3 is a quadratic term (quadratic learning curve) has a lower AIC (prefer goodness of fit) but larger BIC (prefer simpler models), and has a significant p-value in the chi-square test, suggesting that it provides a better model-fit but at the same time is not parsimonious (might be over fitting the current data). Be cautious about this trade-off.
+```{r eval=FALSE}
+random_structure = "(1 + go_str + trial3| id)"
+predictors = c("go_str*quic_total*trial3", covariates, random_structure)
+mod2_correct <- model_fun("correct", predictors, df_gng_glmm)
+saveRDS(mod2_correct, file.path(gng_dir, "models/mod2_correct.rds"))
+
+# trial3 as a quadratic term
+random_structure = "(1 + go_str + poly(trial3,2,raw=FALSE)| id)"
+predictors = c("go_str*quic_total*poly(trial3,2,raw=FALSE)", covariates, random_structure)
+mod2_correct_poly <- model_fun("correct", predictors, df_gng_glmm)
+saveRDS(mod2_correct_poly, file.path(gng_dir, "models/mod2_correct_poly.rds"))
+```
+
+```{r}
+mod2_correct <- readRDS(file.path(gng_dir, "models/mod2_correct.rds"))
+summary(mod2_correct)
+# sjPlot::tab_model(mod2_correct)
+
+mod2_correct_poly <- readRDS(file.path(gng_dir, "models/mod2_correct_poly.rds"))
+summary(mod2_correct_poly)
+# sjPlot::tab_model(mod2_correct_poly)
+
+anova(mod2_correct, mod2_correct_poly)
+
+# (plot_model(mod2_correct, type="emm",
+#             terms=c("quic_total", "go_str", "trial3 [3, 15, 30]"), 
+#             title = "MIA_correct_go_str*quic_total*trial3",
+#             # axis.title = c("Unpredictability (Standardized)", "% Go"),
+#             show.data = FALSE, jitter= NULL, line.size = 1)) 
+# ggsave(filename = file.path(plots_dir,"MIA_correct_go_str*quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+
+(plot_model(mod2_correct_poly, type="emm",
+            terms=c("quic_total", "go_str", "trial3 [3, 15, 30]"),
+            title = "MIA_correct_poly_go_str*quic_total*trial3",
+            # axis.title = c("Trial Number", "Accuracy"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_correct_poly_quic_total*go_str*trial3.png"), width = 15, height = 10, units = "cm")
+
+# (plot_model(mod2_correct_poly, type="emm",
+#             # terms=c("trial3", "go_str", "quic_total"),
+#             terms=c("trial3", "quic_total"),
+#             title = "MIA_correct_poly_str*quic_total*trial3",
+#             # axis.title = c("Trial Number", "Accuracy"),
+#             show.data = FALSE, jitter= NULL, line.size = 1)) 
+# # ggsave(filename = file.path(plots_dir,"MIA_correct_poly_go_str*quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+
+(plot_model(mod2_correct_poly, type="emm",
+            terms=c("trial3", "go_str", "quic_total [-1, 0, 1]"),
+            # terms=c("trial3", "quic_total"), 
+            title = "MIA_correct_poly_trial3*go_str*quic_total",
+            # axis.title = c("Trial Number", "Accuracy"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+ggsave(filename = file.path(plots_dir,"MIA_correct_poly_trial3*go_str*quic_total.png"), width = 15, height = 10, units = "cm")
+```
+
+#### whether the accuracy for **Pos and Neg feedback** vary with unpredictability?
+The model where trial3 is a quadratic term (quadratic learning curve) has a larger AIC (prefer goodness of fit) and larger BIC (prefer simpler models), and p-value in the chi-square test is not significant, suggesting that the simpler model is preferable.
+```{r eval=FALSE}
+random_structure = "(1 + val_str + trial3| id)" # model with "(1 + val_str + trial3| id)" can't converge
+predictors = c("val_str*quic_total*trial3", covariates, random_structure)
+mod2_val_correct <- model_fun("correct", predictors, df_gng_glmm)
+saveRDS(mod2_val_correct, file.path(gng_dir, "models/mod2_val_correct.rds"))
+
+# trial3 as a quadratic term
+random_structure = "(1 + val_str + poly(trial3,2,raw=FALSE) + trial3| id)"
+predictors = c("val_str*quic_total*poly(trial3,2,raw=FALSE)", covariates, random_structure)
+mod2_val_correct_poly <- model_fun("correct", predictors, df_gng_glmm)
+saveRDS(mod2_val_correct_poly, file.path(gng_dir, "models/mod2_val_correct_poly.rds"))
+```
+
+There is no effect of unpredictability in how children learn to respond to cues with potential positive and negative feedback (see coefficient for "quic_total", "val_strpositive:quic_total", "quic_total:trial3", and "val_strpositive:quic_total:trial3").
+```{r}
+mod2_val_correct <- readRDS(file.path(gng_dir, "models/mod2_val_correct.rds"))
+summary(mod2_val_correct)
+# sjPlot::tab_model(mod2_val_correct)
+
+mod2_val_correct_poly <- readRDS(file.path(gng_dir, "models/mod2_val_correct_poly.rds"))
+summary(mod2_val_correct_poly)
+# sjPlot::tab_model(mod2_val_correct_poly)
+
+anova(mod2_val_correct, mod2_val_correct_poly)
+
+(plot_model(mod2_val_correct, type="emm",
+            terms=c("quic_total", "val_str", "trial3 [0, 15, 30]"),
+            title = "MIA_correct_val_str*quic_total*trial3",
+            # axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1))
+ggsave(filename = file.path(plots_dir,"MIA_correct_val_str*quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+
+# (plot_model(mod2_val_correct_poly, type="emm",
+#             terms=c("quic_total", "val_str", "trial3 [0, 15, 30]"),
+#             title = "MIA_correct_poly_val_str*quic_total*trial3",
+#             # axis.title = c("Trial Number", "Accuracy"),
+#             show.data = FALSE, jitter= NULL, line.size = 1)) 
+# ggsave(filename = file.path(plots_dir,"MIA_correct_poly_val_str*quic_total*trial3.png"), width = 15, height = 10, units = "cm")
+# 
+# (plot_model(mod2_val_correct_poly, type="emm",
+#             terms=c("trial3", "val_str", "quic_total [-1, 0, 1]"),
+#             # terms=c("trial3", "quic_total"), 
+#             title = "MIA_correct_poly_trial3*val_str*quic_total",
+#             # axis.title = c("Trial Number", "Accuracy"),
+#             show.data = FALSE, jitter= NULL, line.size = 1)) 
+# ggsave(filename = file.path(plots_dir,"MIA_correct_poly_trial3*val_str*quic_total.png"), width = 15, height = 10, units = "cm")
+```
+
+### DV: Learners vs Non-learners
+```{r eval=FALSE}
+# classify Learners and Non-learners according to the second half of the task
+df_learner <- df_gng_glmm %>% filter(trial_num > 15) %>% 
+  group_by(id) %>% summarise(accuracy = mean(correct)) %>% 
+  full_join(., df_gng_glmm) %>% 
+  group_by(id) %>% slice(1) %>% 
+  mutate(learner_status = if_else(accuracy > .50, "Learner", "Non-learner") %>% as.factor) # according to de Berker paper
+
+# Finding the top and bottom 20% cutoffs for quic
+(top_cutoff <- quantile(df_learner$quic_total, probs = 0.8))
+(bottom_cutoff <- quantile(df_learner$quic_total, probs = 0.2))
+
+# Identifying top and bottom 20% kids for quic
+df_learner <- df_learner %>% mutate(quic_status = case_when(quic_total >= top_cutoff ~ "Top20%",
+                                                            quic_total <= bottom_cutoff ~ "Bottom20%",
+                                                            .default = NA))
+```
+
+#### Regression
+```{r eval=FALSE}
+mod_learner <- glm(learner_status ~ quic_total + ds_total + sparse_income_num + pss_total, data = df_learner, family = "binomial")
+summary(mod_learner)
+plot_model(mod_learner)
+```
+
+#### Chi square test
+```{r eval=FALSE}
+# analysis and intrepretation following this source: http://www.sthda.com/english/wiki/chi-square-test-of-independence-in-r
+# Chi square test results
+chisq <- chisq.test(with(df_learner, table(quic_status,learner_status)))
+chisq
+# Observed counts
+chisq$observed
+# Expected counts
+round(chisq$expected,2)
+
+# Contribution in percentage (%)
+contrib <- 100*chisq$residuals^2/chisq$statistic
+round(contrib, 3)
+# Visualize the contribution ()
+corrplot(contrib, is.cor = FALSE)
+```
+
+### DV: Pavlovian bias
+```{r eval=FALSE}
+df_pav <- df_gng_glmm %>% group_by(id) %>% slice(1)
+
+mod_pav_reward <- lm(pav_reward_bias ~ quic_total + ds_total + sparse_income_num + pss_total, data = df_pav)
+mod_pav_punish <- lm(pav_punish_bias ~ quic_total + ds_total + sparse_income_num + pss_total, data = df_pav)
+summary(mod_pav_reward)
+summary(mod_pav_punish)
+```
+
+# Understanding check
+```{r eval=FALSE}
+# prep data
+df_check <- df_learner %>% mutate(accuracy_diff = accuracy_check - accuracy)
+
+# Pearson correlation between task accuracy in the second half and understanding check accuracy
+(check_cor1 <- cor.test(df_check$accuracy, df_check$accuracy_check, method = "pearson"))
+(check_cor2 <- cor.test(df_check$quic_total, df_check$accuracy, method = "pearson"))
+(check_cor3 <- cor.test(df_check$quic_total, df_check$accuracy_check, method = "pearson"))
+(check_cor4 <- cor.test(df_check$quic_total, df_check$accuracy_diff, method = "pearson"))
+
+# visualize the correlation
+library("ggpubr")
+ggscatter(df_check, x = "accuracy", y = "accuracy_check", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Task accuracy", ylab = "Understanding check accuracy")
+
+ggscatter(df_check, x = "quic_total", y = "accuracy", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Unpredictability", ylab = "Task accuracy")
+
+ggscatter(df_check, x = "quic_total", y = "accuracy_check", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Unpredictability", ylab = "Understanding check accuracy")
+
+ggscatter(df_check, x = "quic_total", y = "accuracy_diff", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Unpredictability", ylab = "Difference between learning and use")
+
+# which individual difference might predict the difference between learning and use?
+summary(lm(accuracy_diff ~ quic_total + ds_total + sparse_income_num + pss_total + conflict_total, data = df_check))
+```
+
+## In the first half of the task
+##### whether the learning of **go and nogo cues** vary with unpredictability?
+```{r eval=FALSE}
+data = subset(df_gng_glmm, trial_num <= 15)
+random_structure = "(1 + go_str + trial_num| id)"
+
+predictors = c("go_str*quic_total*trial_num", covariates, random_structure)
+mod2 <- model_fun("go", predictors, data)
+summary(mod2)
+# sjPlot::tab_model(mod2)
+```
+
+```{r eval=FALSE}
+(plot_model(mod2, type="eff",
+            terms=c("quic_total", "go_str", "trial_num [5, 10, 15]"), 
+            title = "MIA: Learning of Go/NoGo cues in 1st half",
+            axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+# + ylim(0.3,1)
+ggsave(filename = file.path(plots_dir,"MIA_action_learning_1st_half.png"), width = 15, height = 10, units = "cm")
+```
+
+##### positive trials
+```{r eval=FALSE}
+data <- df_gng_glmm %>% filter(win_maintain == 1) %>% filter(trial_num <= 15)
+print("Glancing each id: ")
+sort(table(data$id))
+
+mod2_pos <- model_fun("go", predictors, data)
+summary(mod2_pos)
+# sjPlot::tab_model(mod2)
+```
+
+```{r eval=FALSE}
+(plot_model(mod2_pos, type="eff",
+            terms=c("trial_num", "go_str"), 
+            title = "MIA: Learning of Go/NoGo cues in positive trials during 1st half",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+# + ylim(0.3,1)
+ggsave(filename = file.path(plots_dir,"MIA_action_learning_positive_1st_half.png"), width = 15, height = 10, units = "cm")
+```
+
+##### negative trials
+```{r eval=FALSE}
+data <- df_gng_glmm %>% filter(win_maintain == 0) %>% filter(trial_num <= 15)
+print("Glancing each id: ")
+sort(table(data$id))
+
+mod2_neg <- model_fun("go", predictors, data)
+summary(mod2_neg)
+```
+
+```{r eval=FALSE}
+(plot_model(mod2_neg, type="eff",
+            terms=c("trial_num", "go_str"), 
+            title = "MIA: Learning of Go/NoGo cues in negative trials during 1st half",
+            axis.title = c("Trial Number", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+# + ylim(0.3,1)
+ggsave(filename = file.path(plots_dir,"MIA_action_learning_negative_1st_half.png"), width = 15, height = 10, units = "cm")
+```
+
+##### whether the learning of **Pos and Neg feedback** vary with unpredictability?
+```{r eval=FALSE}
+data = subset(df_gng_glmm, trial_num <= 15)
+random_structure = "(1 + val_str + trial_num| id)"
+predictors = c("val_str*quic_total*trial_num", covariates, random_structure)
+mod2_val <- model_fun("go", predictors, data)
+summary(mod2_val)
+# sjPlot::tab_model(mod2_val)
+```
+
+```{r eval=FALSE}
+# inf_mod2 <- influence(mod2_val, "id", maxfun=100)
+# infIndexPlot(inf_mod2)
+# plot((dfbetas(inf_mod2)[, "val_strpositive:quic_total:trial_num"]))
+# 
+# mod2_val.1 <- update(mod2_val, subset = id != c('2028', '2018')) # check deleting ids with high cook's distance
+# inf_mod2.1 <- influence(mod2_val.1, "id", maxfun=100)
+# infIndexPlot(inf_mod2.1)
+# compareCoefs(mod2_val, mod2_val.1)
+# 
+# dfbeta(inf_mod2)
+# dfbetas(inf_mod2)
+```
+
+```{r eval=FALSE}
+# (plot_model(mod2_val, type="eff",
+#             terms=c("quic_total", "val_str", "trial_num [5, 10, 15]"), 
+#             title = "MIA: Learning of Pos/Neg cues in 1st half",
+#             axis.title = c("Unpredictability (Standardized)", "% Go"),
+#             show.data = FALSE, jitter= NULL, line.size = 1)) 
+# # + ylim(0.3,1)
+# ggsave(filename = file.path(plots_dir,"MIA_valence_learning_1st_half.png"), width = 15, height = 10, units = "cm")
+
+(plot_model(mod2_val, type="eff",
+            terms=c("quic_total", "val_str"), 
+            title = "MIA: Learning of Pos/Neg cues in 1st half",
+            axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+# + ylim(0.3,1)
+ggsave(filename = file.path(plots_dir,"MIA_valence_learning_1st_half.png"), width = 15, height = 10, units = "cm")
+```
+
+## In the second half of the task
+##### whether the learning of **go and nogo cues** vary with unpredictability?
+```{r eval=FALSE}
+data = subset(df_gng_glmm, trial_num > 15)
+random_structure = "(1 + go_str + trial_num| id)"
+predictors = c("go_str*quic_total*trial_num", covariates, random_structure)
+mod3 <- model_fun("go", predictors, data)
+summary(mod3)
+# sjPlot::tab_model(mod3)
+```
+
+##### whether the learning of **Pos and Neg feedback** vary with unpredictability
+```{r eval=FALSE}
+data = subset(df_gng_glmm, trial_num > 15)
+random_structure = "(1 + val_str + trial_num| id)"
+predictors = c("val_str*quic_total*trial_num", covariates, random_structure)
+mod3_val <- model_fun("go", predictors, data)
+summary(mod3_val)
+# sjPlot::tab_model(mod3_val)
+```
+
+```{r eval=FALSE}
+# (plot_model(mod2_val, type="eff",
+#             terms=c("quic_total", "val_str", "trial_num [5, 10, 15]"), 
+#             title = "MIA: Learning of Pos/Neg cues in 1st half",
+#             axis.title = c("Unpredictability (Standardized)", "% Go"),
+#             show.data = FALSE, jitter= NULL, line.size = 1)) 
+# # + ylim(0.3,1)
+# ggsave(filename = file.path(plots_dir,"MIA_valence_learning_1st_half.png"), width = 15, height = 10, units = "cm")
+
+(plot_model(mod3_val, type="eff",
+            terms=c("quic_total", "val_str", "trial_num [20, 25, 30]"), 
+            title = "MIA: Learning of Pos/Neg cues in 2nd half",
+            axis.title = c("Unpredictability (Standardized)", "% Go"),
+            show.data = FALSE, jitter= NULL, line.size = 1)) 
+# + ylim(0.3,1)
+ggsave(filename = file.path(plots_dir,"MIA_valence_learning_2nd_half.png"), width = 15, height = 10, units = "cm")
+```
+
+# Exploratory
+### Cluster analyses
+##### prep data
+```{r eval=FALSE}
+df_cluster <- gng_wide %>% left_join(., df_covar) %>% mutate_each_(funs(factor(.)),c("cluster_k2","cluster_k3","cluster_k4"))
+
+table(df_cluster$cluster_k2)
+table(df_cluster$cluster_k3)
+table(df_cluster$cluster_k4)
+##### things to consider: potential problem of uneven cluster?
+
+# distribution of each variable across the 3 groups -- numeric
+with(df_cluster, do.call(rbind, 
+                         tapply(quic_total, cluster_k3, 
+                                function(x) c(M = mean(x, na.rm = TRUE), SD = sd(x, na.rm = TRUE)))))
+
+# distribution of each variable across the 3 groups -- histogram
+ggplot(df_cluster, aes(x = quic_total)) +
+  geom_histogram(position="identity") +
+  facet_grid(cluster_k3 ~ .) # group 2 seems to have the most quic_total score
+ggplot(df_cluster, aes(x = pss_total)) +
+  geom_histogram(position="identity") +
+  facet_grid(cluster_k3 ~ .)
+ggplot(df_cluster, aes(x = ds_total)) +
+  geom_histogram(position="identity") +
+  facet_grid(cluster_k3 ~ .)
+ggplot(df_cluster, aes(x = conflict_total)) +
+  geom_histogram(position="identity") +
+  facet_grid(cluster_k3 ~ .)
+ggplot(df_cluster, aes(x = sparse_income_num)) +
+  geom_histogram(position="identity") +
+  facet_grid(cluster_k3 ~ .)
+
+############ experimenting plotting codes ############
+hist_fun <- function(var, cluster) {
+  p <- ggplot(df_cluster, aes(x = get(var))) +
+    geom_histogram(position="identity") +
+    facet_grid(get(cluster) ~ .)
+  return(p)
+}
+
+vars <- c("quic_total","pss_total","ds_total","sparse_income_num","conflict_total")
+clusters <- c("cluster_k2","cluster_k3","cluster_k4")
+list <- mapply(hist_fun, vars, clusters) # look for how to show the plots as the codes below
+```
+
+##### multinomial regression
+This analysis uses unpredictability and other covariates (continuous variables) to predict the chance of being in each clusters (nominal variable). Results show that none of the predictors were significant.
+*refer to this source: https://stats.oarc.ucla.edu/r/dae/multinomial-logistic-regression/
+```{r eval=FALSE}
+df_cluster$cluster_k2_new <- relevel(df_cluster$cluster_k2, ref = "1")
+df_cluster$cluster_k3_new <- relevel(df_cluster$cluster_k3, ref = "1")
+df_cluster$cluster_k4_new <- relevel(df_cluster$cluster_k4, ref = "2")
+
+fit2 <- multinom(cluster_k2_new ~ quic_total + ds_total + sparse_income_num, data = df_cluster)
+fit3 <- multinom(cluster_k3_new ~ quic_total + ds_total + sparse_income_num, data = df_cluster)
+fit4 <- multinom(cluster_k4_new ~ quic_total + ds_total + sparse_income_num, data = df_cluster)
+
+tbl_regression(fit2, exp = TRUE)
+tbl_regression(fit3, exp = TRUE)
+tbl_regression(fit4, exp = TRUE)
+```
+
+```{r eval=FALSE}
+df_cluster$cluster_k2_new <- relevel(df_cluster$cluster_k2, ref = "1")
+df_cluster$cluster_k3_new <- relevel(df_cluster$cluster_k3, ref = "2")
+df_cluster$cluster_k4_new <- relevel(df_cluster$cluster_k4, ref = "4")
+
+fit2 <- multinom(cluster_k2_new ~ quic_total + ds_total + sparse_income_num, data = df_cluster)
+fit3 <- multinom(cluster_k3_new ~ quic_total + ds_total + sparse_income_num, data = df_cluster)
+fit4 <- multinom(cluster_k4_new ~ quic_total + ds_total + sparse_income_num, data = df_cluster)
+
+tbl_regression(fit2, exp = TRUE)
+tbl_regression(fit3, exp = TRUE)
+tbl_regression(fit4, exp = TRUE)
+```
+
+
