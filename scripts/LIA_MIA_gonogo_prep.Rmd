@@ -1,0 +1,576 @@
+---
+title: "LIA_MIA_gonogo_prep"
+author: "Yuyan Xu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+```
+
+# Source functions
+Note: data quality check at this step is preliminary (i.e., button press < 10%). May need to look closer at the data to further investigate.
+```{r eval=FALSE}
+# preprocess data (may be omitted if data are ready)
+source('Source/Setup.R')
+source('Source/ProcessLIAData.R')
+source('Source/ProcessMIAData.R')
+```
+
+```{r results='hide'}
+# read in preprocessed data
+source('Source/Setup.R')
+source('Source/Functions.R')
+source('Source/ReadData_prep.R')
+```
+
+# GNG long data
+## re-organize by cues
+```{r}
+# initialize an empty data frame
+df_gng_all <- data.frame(matrix(ncol = 18, nrow = 0))
+x <- c("x1","id","filename","trial","trial3","pavlovia_trial","cue","go","go_nogo","win_maintain","correct","rt","correct_check","pav_reward_bias","pav_punish_bias","trial_num","version","study")
+colnames(df_gng_all) <- x
+
+# break down df by cue type (go to win, go to avoid loss, no go to win, no go to avoid loss) and assign trial number 1-30 to each trial in each id
+for (x in c(0:3)) {
+  plot <- gng_all %>% filter(cue == x) 
+  trial_num <- rep(1:30, times=nrow(plot)/30)
+  plot <- cbind(plot, trial_num)
+  plot$trial3 <- round((plot$trial_num+1)/3)*3 # group trial numbers by 3 for a smoother graph
+  df_gng_all <- rbind(df_gng_all, plot)
+}
+
+# change the first 'trial3' to be 1 as the starting point (to show the exact entry point, not aggregating across the first 3 trials as children pick up the pattern very fast)
+df_gng_all <- df_gng_all %>% mutate(trial3 = if_else(trial_num == 1, 1, trial3))
+
+# inspect sample size
+paste("Current sample size: ", n_distinct(df_gng_all$id))
+print("Glancing each id: ")
+sort(table(df_gng_all$id)) # rows per id
+
+paste("LIA first version sample size: ", n_distinct(unique(subset(df_gng_all, version == "first")$id)))
+paste("LIA second version sample size: ", n_distinct(unique(subset(df_gng_all, version == "second")$id)))
+paste("LIA third version sample size: ", n_distinct(unique(subset(df_gng_all, version == "third")$id)))
+paste("MIA sample size: ", n_distinct(unique(subset(df_gng_all, version == "MIA")$id)
+))
+```
+
+## create variables
+### accuracy
+**mean_acc** = mean accuracy across the task  
+**mean_acc_2ndhalf** = mean accuracy during the second part of the task (ref. de Berker 2016)  
+```{r}
+##### accuracy across the task
+df_gng_all <- df_gng_all %>% group_by(id) %>% mutate(mean_acc = mean(correct))
+
+##### accuracy during the second part of the task (ref. de Berker 2016)
+df <- df_gng_all %>% filter(trial_num > 15) %>% group_by(id) %>% summarise(mean_acc_2ndhalf = mean(correct))
+df_gng_all <- df_gng_all %>% left_join(., df)
+```
+
+### presentation order 
+**nonswitch** = 1 if same cue as the previous trial, otherwise 0  
+**run_length** = number of consecutive cues in a row. E.g., if a cue is presented for 3 times in a row, run_length is 3.  
+```{r}
+# nonswitch: if the cue in the current trial is the same as the previous trial, nonswitch is 1, otherwise 0
+df_gng_all <- df_gng_all %>% group_by(id) %>% 
+  mutate(nonswitch = ifelse(trial == lag(trial) + 1, 1, 0),
+         nonswitch = ifelse(is.na(nonswitch), 0, nonswitch),
+         run_length = 1)
+
+# run_length: count the number of consecutive cues in a row. e.g., if a cue is presented for 3 times in a row, run_length is 3.
+for (i in 1:nrow(df_gng_all)) {
+  df_gng_all$run_length[i] <-
+    ifelse(df_gng_all$nonswitch[i] == 1,
+           df_gng_all$run_length[i - 1] + 1,
+           1)
+}
+```
+
+### habitual responding  
+**action_change** = 1 *correct* action of current trial different from previous trial, otherwise 0  
+**response_change** = 1 kid's response to current trial different from previous trial, otherwise 0  
+**habitual_responding** = 1 kids maintain their previous response even if the correct action changes (i.e., response_change == 0 & action_change == 1), otherwise 0  
+```{r}
+df_gng_all <- df_gng_all %>% 
+  mutate(action_change = ifelse(go_nogo != lag(go_nogo), 1, 0), # 1 = correct action of current trial diff from previous trial
+         response_change = ifelse(go != lag(go), 1, 0), # 1 = kid's response to current trial diff from previous trial
+         habitual_responding = ifelse(action_change == 1 & response_change == 0, 1, 0)) %>% # 1 = habitual responding (def above)
+  mutate_at(vars(action_change:habitual_responding), ~replace(., is.na(.), 0)) # get rid of the NA at the first row for each id
+```
+
+### pavlovia bias  
+**pav_reward_bias** = action invigoration in rewarded conditions ([Go in Go To Win + Go in NoGo to Win]/Total Go)  
+**pav_punish_bias** = action suppression in punished conditions ([NoGo in Go to Avoid Losing + NoGo in NoGo to Avoid Losing]/Total NoGo)  
+image: ![](../plots/gonogo_task/Pav_bias_illustration.png)  
+
+These two variables provided a summary measure of how strongly action and valence interacted in choice (de Berker et al., 2016, pp. 9). Higher values in **pav_reward_bias** and **pav_punish_bias** suggest a stronger tendency to act in rewarded conditions and to suppress action in punished conditions, respectively.   
+```{r include=FALSE}
+gng_pavlovia_bias <- df_gng_all %>% 
+  mutate(pav_go = if_else((cue == 0 | cue == 1) & (go == 1), 1, 0), # Go in Go To Win (cue 0) + Go in NoGo to Win (cue 1)
+         pav_nogo = if_else((cue == 2 | cue == 3) & (go == 0), 1, 0)) # NoGo in Go to Avoid Losing (cue 2) + NoGo in NoGo to Avoid Losing (cue 3)
+
+ids <- unique(gng_pavlovia_bias$id)
+go <- gng_pavlovia_bias %>% filter(pav_go == 1) %>% group_by(id) %>% summarise(n = n())  # Go in Go To Win + Go in NoGo to Win
+nogo <- gng_pavlovia_bias %>% filter(pav_nogo == 1) %>% group_by(id) %>% summarise(n = n()) # NoGo in Go to Avoid Losing + NoGo in NoGo to Avoid Losing
+go_total <-  gng_pavlovia_bias %>% filter(go == 1) %>% group_by(id) %>% summarise(n = n()) # Total Go
+nogo_total <-  gng_pavlovia_bias %>% filter(go == 0) %>% group_by(id) %>% summarise(n = n()) # Total NoGo
+
+# initialize an empty data frame
+df <- data.frame(matrix(ncol = 3, nrow = 0))
+
+for (i in c(1:length(ids))) {
+  pav_reward_bias = go$n[i]/go_total$n[i]
+  # print(pav_reward_bias)
+  pav_punish_bias = nogo$n[i]/nogo_total$n[i]
+  # print(pav_punish_bias)
+  pav_bias <- c(go$id[i], pav_reward_bias, pav_punish_bias)
+  df <- rbind(df, pav_bias)
+}
+
+x <- c("id","pav_reward_bias","pav_punish_bias")
+colnames(df) <- x
+
+df_gng_all <- df_gng_all %>% left_join(., df)
+```
+
+### understanding check accuracy
+**accuracy_check** = mean accuracy in understanding check 
+```{r}
+# summarize accuracy
+gng_check <- gng_check_raw %>% group_by(id) %>% summarise(accuracy_check = mean(correct_check))
+
+df_gng_all <- df_gng_all %>% left_join(., gng_check)
+```
+
+## write long data
+```{r}
+write_csv(df_gng_all, file.path(data_dir, "gng_long.csv"))
+write_csv(gng_check_raw, file.path(data_dir, "gng_check_raw.csv"))
+```
+
+# Learning curve plots
+## function
+```{r}
+make_plot <- function(version, type) {
+  # select ids based on version
+  ids <- switch(version, 
+                "first" = unique(subset(df_gng_all, version == "first")$id),
+                "second" = unique(subset(df_gng_all, version == "second")$id),
+                "third" = unique(subset(df_gng_all, version == "third")$id),
+                "MIA" = unique(subset(df_gng_all, version == "MIA")$id))
+  
+  # subset data
+  df <- df_gng_all %>% filter(id %in% ids)
+  
+  # specify string labels
+  if (version == "MIA") {
+    cue0_label <- 'go for positive'
+    cue1_label <- 'no go for positive'
+    cue2_label <- 'go to avoid negative'
+    cue3_label <- 'no go to avoid negative'
+    var_label1 <- 'positive'
+    var_label2 <- 'negative'
+  } else {
+    cue0_label <- 'go to win'
+    cue1_label <- 'no go to win'
+    cue2_label <- 'go to avoid loss'
+    cue3_label <- 'no go to avoid loss'
+    var_label1 <- 'win'
+    var_label2 <- 'avoid loss'
+  }
+  
+  groupvars <- switch(type,
+                      "group" = c("trial3","cue"),
+                      "individual" = c("id", "trial3","cue")
+  )
+  
+  # create a data frame for plotting (do not use numeric values for group variables in ggplot)
+  df_plot_all<- summarySE(df, measurevar="go", groupvars=groupvars) %>% 
+    mutate(
+      cue_str = case_when(
+        cue == 0 ~ cue0_label,
+        cue == 1 ~ cue1_label,
+        cue == 2 ~ cue2_label,
+        TRUE ~ cue3_label
+      ),
+      go_str = case_when(
+        cue == 0 | cue ==2 ~ 'go',
+        cue == 1 | cue ==3 ~ 'nogo'
+      ),
+      val_str = case_when(
+        cue == 0 | cue ==1 ~ var_label1,
+        cue == 2 | cue ==3 ~ var_label2
+      ))
+  
+  if (type == "group") {
+    # 1. plot the line graph for all four conditions (cue_str)
+    ggplot(df_plot_all, aes(x=trial3, y=go, colour=cue_str, group=cue_str)) + 
+      geom_point(size=1.5)+
+      geom_line(size=0.8) +
+      geom_ribbon(aes(ymin=go-se, ymax=go+se),alpha=0.1, color=NA) +
+      ylab("% go")+xlab("Trial")+
+      scale_color_manual(values=cue_color)+
+      theme_classic()+
+      expand_limits(y=0) +                        # Expand y range
+      scale_y_continuous(breaks=seq(0, 1, by = 0.2)) +   
+      theme(text = element_text(size=16,  family="sans"))+
+      theme_bw()
+    ggsave(filename = file.path(plots_dir,paste0(version, "_cues.png")), width = 15, height = 10, units = "cm")
+    
+    # 2. plot the line graph for go nogo conditions (go_str)
+    df_plot_go_str <- df_plot_all %>% group_by(trial3,go_str) %>% summarise(mean_go = mean(go), mean_se = mean(se))
+    
+    ggplot(df_plot_go_str, aes(x=trial3, y=mean_go, colour=go_str, group=go_str)) + 
+      geom_point(size=1.5)+
+      geom_line(size=0.8) +
+      geom_ribbon(aes(ymin=mean_go-mean_se, ymax=mean_go+mean_se),alpha=0.1, color=NA) +
+      ylab("% go")+xlab("Trial")+
+      scale_colour_hue(name="action",    # Legend label, use darker colors
+                       breaks=c('go', 'nogo'),
+                       labels=c('go', 'nogo'),
+                       l=40) +                    # Use darker colors, lightness=40
+      scale_color_manual(values=action_color)+
+      theme_classic()+
+      expand_limits(y=0) +                        # Expand y range
+      scale_y_continuous(breaks=seq(0, 1, by = 0.2)) +         
+      theme(text = element_text(size=16,  family="sans"))+
+      theme(legend.position="none", strip.background=element_blank(), legend.key=element_rect(color=NA))+
+      theme_bw() +
+      theme(legend.justification=c(1,0),
+            legend.position=c(1,0))               # Position legend in bottom right
+    ggsave(filename = file.path(plots_dir, paste0(version, "_action.png")), width = 15, height = 10, units = "cm")
+    
+    # 3. plot the line graph for valance conditions (val_str)
+    df_plot_val_str <- df_plot_all %>% group_by(trial3,val_str) %>% summarise(mean_go = mean(go), mean_se = mean(se))
+    
+    ggplot(df_plot_val_str, aes(x=trial3, y=mean_go, colour=val_str, group=val_str)) + 
+      geom_point(size=1.5)+
+      geom_line(size=0.8) +
+      geom_ribbon(aes(ymin=mean_go-mean_se, ymax=mean_go+mean_se),alpha=0.1, color=NA) +
+      ylab("% go")+xlab("Trial")+
+      scale_colour_hue(name="outcome valence",    # Legend label, use darker colors
+                       breaks=c(var_label1, var_label2),
+                       labels=c(var_label1, var_label2),
+                       l=40) +                    # Use darker colors, lightness=40
+      theme_classic()+
+      expand_limits(y=0) +                        # Expand y range
+      scale_y_continuous(breaks=seq(0, 1, by = 0.2)) +   
+      theme(text = element_text(size=16,  family="sans"))+
+      theme(legend.position="none", strip.background=element_blank(), legend.key=element_rect(color=NA))+
+      theme_bw() +
+      theme(legend.justification=c(1,0),
+            legend.position=c(1,0))    
+    ggsave(filename = file.path(plots_dir,paste0(version, "_valence.png")), width = 15, height = 10, units = "cm")
+    
+  } 
+  else {
+    
+    # 1. plot the line graph for each participant (id) and cue (cue_str)
+    ggplot(df_plot_all, aes(x=trial3, y=go, colour=cue_str, group=cue_str)) + 
+      geom_point(size=1.5)+
+      geom_line(size=0.8) +
+      geom_ribbon(aes(ymin=go-se, ymax=go+se),alpha=0.1, color=NA) +
+      ylab("% go")+xlab("Trial")+
+      scale_colour_hue(name="cue_str",    # Legend label, use darker colors
+                       breaks=c(cue0_label, cue1_label, cue2_label, cue3_label),
+                       labels=c(cue0_label, cue1_label, cue2_label, cue3_label),
+                       l=40) +                    # Use darker colors, lightness=40
+      theme_classic()+
+      expand_limits(y=0) +                        # Expand y range
+      facet_wrap(~id) + # add id as the facet wrap
+      scale_y_continuous(breaks=seq(0, 1, by = 0.2)) +   
+      theme(text = element_text(size=16,  family="sans"))+
+      theme(legend.position="none", strip.background=element_blank(), legend.key=element_rect(color=NA))+
+      theme_bw() +
+      theme(legend.justification=c(1,0),
+            legend.position=c(1,0)) 
+    ggsave(filename = file.path(plots_dir,paste0(version, "_ind_cues.png")), width = 120, height = 80, units = "cm")
+    
+    # plot the line graph for each participant (id) and go nogo conditions (go_str)
+    df_plot_go_str <- df_plot_all %>% group_by(id,trial3,go_str) %>% summarise(mean_go = mean(go), mean_se = mean(se))
+    
+    ggplot(df_plot_go_str, aes(x=trial3, y=mean_go, colour=go_str, group=go_str)) + 
+      geom_point(size=1.5)+
+      geom_line(size=0.8) +
+      geom_ribbon(aes(ymin=mean_go-mean_se, ymax=mean_go+mean_se),alpha=0.1, color=NA) +
+      ylab("% go")+xlab("Trial")+
+      scale_colour_hue(name="action",    # Legend label, use darker colors
+                       breaks=c('go', 'nogo'),
+                       labels=c('go', 'nogo'),
+                       l=40) +     
+      theme_classic()+
+      expand_limits(y=0) +                        # Expand y range
+      facet_wrap(~id) + # add id as the facet wrap
+      scale_y_continuous(breaks=seq(0, 1, by = 0.2)) +   
+      theme(text = element_text(size=16,  family="sans"))+
+      theme(legend.position="none", strip.background=element_blank(), legend.key=element_rect(color=NA))+
+      theme_bw() +
+      theme(legend.justification=c(1,0),
+            legend.position=c(1,0)) 
+    ggsave(filename = file.path(plots_dir,paste0(version, "_ind_action.png")), width = 120, height = 80, units = "cm")
+    
+    # plot the line graph for each participant (id) and win loss conditions (val_str)
+    df_plot_val_str <- df_plot_all %>% group_by(id,trial3,val_str) %>% summarise(mean_go = mean(go), mean_se = mean(se))
+    
+    ggplot(df_plot_val_str, aes(x=trial3, y=mean_go, colour=val_str, group=val_str)) + 
+      geom_point(size=1.5)+
+      geom_line(size=0.8) +
+      geom_ribbon(aes(ymin=mean_go-mean_se, ymax=mean_go+mean_se),alpha=0.1, color=NA) +
+      ylab("% go")+xlab("Trial")+
+      scale_colour_hue(name="valence",    # Legend label, use darker colors
+                       breaks=c(var_label1, var_label2),
+                       labels=c(var_label1, var_label2),
+                       l=40) +     
+      theme_classic()+
+      expand_limits(y=0) +                        # Expand y range
+      facet_wrap(~id) + # add id as the facet wrap
+      scale_y_continuous(breaks=seq(0, 1, by = 0.2)) +   
+      theme(text = element_text(size=16,  family="sans"))+
+      theme(legend.position="none", strip.background=element_blank(), legend.key=element_rect(color=NA))+
+      theme_bw() +
+      theme(legend.justification=c(1,0),
+            legend.position=c(1,0)) 
+    ggsave(filename = file.path(plots_dir,paste0(version, "_ind_valence.png")), width = 120, height = 80, units = "cm")
+  }
+}
+```
+
+## group plots
+```{r}
+make_plot("first", "group")
+make_plot("second", "group")
+make_plot("third", "group")
+make_plot("MIA", "group")
+```
+
+## individual plots
+```{r}
+make_plot("first", "individual")
+make_plot("second", "individual")
+make_plot("third", "individual")
+make_plot("MIA", "individual")
+```
+
+# Cluster analyses
+### prepare the data
+````{r eval=FALSE, include=FALSE}
+df_plot_all<- summarySE(df_gng_all, measurevar="go", groupvars=c("id", "trial3","cue")) %>%  # with id included
+  mutate(
+    cue_str = case_when(
+      cue == 0 ~ 'go to win',
+      cue == 1 ~ 'no go to win',
+      cue == 2 ~ 'go to avoid loss',
+      TRUE ~ 'no go to avoid loss'
+    ),
+    go_str = case_when(
+      cue == 0 | cue ==2 ~ 'go',
+      cue == 1 | cue ==3 ~ 'nogo'
+    ),
+    val_str = case_when(
+      cue == 0 | cue ==1 ~ 'win',
+      cue == 2 | cue ==3 ~ 'avoid loss'
+    ))
+
+df_go <- df_plot_all %>% 
+  group_by(id,trial3,go_str) %>% 
+  summarise(mean_go = mean(go), mean_se = mean(se)) %>% 
+  select(-mean_se) %>% 
+  pivot_wider(names_from = go_str, values_from = mean_go) %>% 
+  mutate(diff_go = go - nogo) %>% group_by(id) %>% summarise(mean_go_minus_nogo = mean(diff_go))
+
+df_val <- df_plot_all %>% 
+  group_by(id,trial3,val_str) %>% 
+  summarise(mean_go = mean(go), mean_se = mean(se)) %>% 
+  select(-mean_se) %>% 
+  pivot_wider(names_from = val_str, values_from = mean_go) %>% 
+  mutate(diff_val = win - `avoid loss`) %>% group_by(id) %>% summarise(mean_win_minus_loss = mean(diff_val))
+
+df_cluster <- full_join(df_go, df_val) %>% 
+  mutate(z_go = as.vector(scale(mean_go_minus_nogo)), z_val = as.vector(scale(mean_win_minus_loss))) %>% 
+  column_to_rownames('id') %>% 
+  select(z_go, z_val)
+
+df_cluster_compare <- full_join(df_go, df_val) %>% 
+  column_to_rownames('id')
+
+print("take a look at the original data: ")
+head(df_cluster_compare)
+nrow(df_cluster_compare) 
+
+print("take a look at the z-scored data: ")
+head(df_cluster)
+nrow(df_cluster) 
+
+
+```
+
+### k-means clustering using original data
+````{r eval=FALSE, include=FALSE}
+### 1. visualize the Euclidean distance: dissimilarities (red) versus similarity (teal).
+# distance <- get_dist(df_cluster_compare)
+# fviz_dist(distance, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+
+### 2. choose optimal cluster numbers
+# option 1 Average Silhouette Method: The average silhouette method computes the average silhouette of observations for different values of k. The optimal number of clusters k is the one that maximizes the average silhouette over a range of possible values for k.
+#fviz_nbclust(df_cluster_compare, kmeans, method = "silhouette")
+
+# option 2 Elbow Method
+#fviz_nbclust(df_cluster_compare, kmeans, method = "wss")
+
+### 3. clustering analysis
+(k2_orig <- kmeans(df_cluster_compare, centers = 2, nstart = 100))
+(k3_orig <- kmeans(df_cluster_compare, centers = 3, nstart = 100))
+(k4_orig <- kmeans(df_cluster_compare, centers = 4, nstart = 100))
+#str(k2)
+
+### 4. visualize the results
+# print("Clustering plot for 2 centers: ")
+# fviz_cluster(k2, data = df_cluster_compare)
+# print("Clustering plot for 4 centers: ")
+# fviz_cluster(k4, data = df_cluster_compare)
+
+### 5. compute the cluster center
+center_k2_orig <- df_cluster_compare %>%
+  mutate(Cluster = k2_orig$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean") %>% 
+  column_to_rownames('Cluster')
+
+center_k3_orig <- df_cluster_compare %>%
+  mutate(Cluster = k3_orig$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean") %>% 
+  column_to_rownames('Cluster')
+
+center_k4_orig <- df_cluster_compare %>%
+  mutate(Cluster = k4_orig$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean") %>% 
+  column_to_rownames('Cluster')
+```
+
+### k-means clustering using z-scored data
+````{r eval=FALSE, include=FALSE}
+### 1. visualize the Euclidean distance: dissimilarities (red) versus similarity (teal).
+distance <- get_dist(df_cluster)
+fviz_dist(distance, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+
+### 2. choose optimal cluster numbers
+# option 1 Average Silhouette Method: The average silhouette method computes the average silhouette of observations for different values of k. The optimal number of clusters k is the one that maximizes the average silhouette over a range of possible values for k.
+#fviz_nbclust(df_cluster, kmeans, method = "silhouette")
+
+# option 2 Elbow Method
+#fviz_nbclust(df_cluster, kmeans, method = "wss")
+
+### 3. clustering analysis
+(k2_zscored <- kmeans(df_cluster, centers = 2, nstart = 100))
+(k3_zscored <- kmeans(df_cluster, centers = 3, nstart = 100))
+(k4_zscored <- kmeans(df_cluster, centers = 4, nstart = 100))
+#str(k2)
+
+### 4. visualize the results
+# print("Clustering plot for 2 centers: ")
+# fviz_cluster(k2, data = df_cluster)
+# print("Clustering plot for 4 centers: ")
+# fviz_cluster(k4, data = df_cluster)
+
+### 5. compute the cluster center
+center_k2_zscored <- df_cluster %>%
+  mutate(Cluster = k2_zscored$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean") %>% 
+  column_to_rownames('Cluster')
+
+center_k3_zscored <- df_cluster %>%
+  mutate(Cluster = k3_zscored$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean") %>% 
+  column_to_rownames('Cluster')
+
+center_k4_zscored <- df_cluster %>%
+  mutate(Cluster = k4_zscored$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean") %>% 
+  column_to_rownames('Cluster')
+```
+
+
+### Compare original data versus z-scored data cluster results
+````{r eval=FALSE, include=FALSE}
+print("Cluster plot for 2 centers: ")
+print("Original data")
+fviz_cluster(k2_orig, data = df_cluster_compare, stand = FALSE)
+print("Z-scored data")
+fviz_cluster(k2_zscored, data = df_cluster)
+
+print("Cluster plot for 3 centers: ")
+print("Original data")
+fviz_cluster(k3_orig, data = df_cluster_compare, stand = FALSE)
+print("Z-scored data")
+fviz_cluster(k3_zscored, data = df_cluster)
+
+print("Clustering plot for 4 centers: ")
+print("Original data")
+fviz_cluster(k4_orig, data = df_cluster_compare, stand = FALSE)
+print("Z-scored data")
+fviz_cluster(k4_zscored, data = df_cluster)
+```
+
+### join with GNG wide data
+````{r eval=FALSE, include=FALSE}
+df_k2 <- as.data.frame(k2_orig$cluster) %>% rownames_to_column(., var = "id") %>% rename(cluster_k2 = "k2_orig$cluster")
+df_k3 <- as.data.frame(k3_orig$cluster) %>% rownames_to_column(., var = "id") %>% rename(cluster_k3 = "k3_orig$cluster")
+df_k4 <- as.data.frame(k4_orig$cluster) %>% rownames_to_column(., var = "id") %>% rename(cluster_k4 = "k4_orig$cluster")
+df_mean_accuracy <- df_gng_all %>% group_by(id) %>% summarise(mean_accuracy = mean(correct))
+# gng_wide <- full_join(df, df_k2) %>% full_join(., df_k3) %>% full_join(., df_k4) %>% full_join(., df_mean_accuracy)
+gng_wide <- full_join(df_k2, df_k3) %>% full_join(., df_k4) %>% full_join(., df_mean_accuracy)
+write_csv(gng_wide, file.path(data_dir, "gng_wide.csv"))
+```
+
+# Other analyses
+### manipulation check
+```{r eval= FALSE, include=FALSE}
+df_mani_check <- df_gng_all %>% group_by(id, cue) %>% slice_head(n = 3) %>% summarise(avg_trial_no = mean(trial), avg_go = mean(go), avg_acc = mean(correct)) 
+
+cue <- c(0:3)
+for (x in c(1:4)) {
+  df <- df_mani_check %>% filter(cue == x-1)
+  ggplot(df, aes(x=avg_trial_no, y=avg_go)) + geom_point() + xlim(0, 30)
+  ggsave(filename = file.path(plots_dir, paste0("cue", cue[x], "_first3trial.png")), width = 15, height = 10, units = "cm")
+}
+```
+
+
+### sanity check
+```{r eval= FALSE, include=FALSE}
+# check individual differences that might be obscured by the learning curve plot: whether each participant responded correctly in > 50% of trials for each cue condition (use chi-square testing for differences??)
+##### question: what to do with participant exclusion? Filters can be based on: 1) responses to the understanding check -- whether they learned which is the correction action (press the button or not) for each animal at the end of the game; 2) response accuracy -- whether they responded correctly in > 50% of trials for each cue condition. The latter filter is a very stringent one, and may result in excluding more than half of the N. Plus, for some kids, their accuracy rate varies significantly by the cue condition. E.g., for 1018, the accuracy was around .1 for the go trials, but .9 for no go trials. The pilot kids are displaying various interesting patterns in terms of their response accuracy in each condition.
+
+##### Maybe what I should do is to look at trial-by-trial performance, instead of the summary statistics.
+
+# check error rate (square root) of go/nogo trials
+gng_check1 <- gng_all %>% 
+  group_by(go_nogo, id) %>% 
+  summarise(mean_acc = mean(correct), sd_acc = sd(correct)) %>% 
+  mutate(error_rate = 1- mean_acc,
+         sq_root_err_rate = sqrt(error_rate)) # use square root transformation to reduce the distribution skewness 
+
+boxplot(subset(gng_check1, go_nogo == 1)$mean_acc)
+boxplot(subset(gng_check1, go_nogo == 0)$mean_acc)
+# check reaction time of go/nogo trials
+gng_check2 <- gng_all %>% 
+  filter(go_nogo == 1) %>% 
+  summarise(mean_rt = mean(rt, na.rm = TRUE), sd_acc = sd(rt, na.rm = TRUE)) 
+
+gng_check1 <- gng_all %>% group_by(id, go_nogo) %>% summarise(mean_go = mean(go), sd_acc = sd(go)) # look at action bias (go/nogo) on Go action for each id
+
+# t-test for action bias (compare trials of go to win and go to avoid loss versus trials of no go to win and no go to avoid loss) on Go choices
+t.test(subset(gng_all, go_nogo == 0)$go, subset(gng_all, go_nogo == 1)$go, alternative = "two.sided", var.equal = FALSE)
+
+# t-test for valence bias (compare trials of go to win and no go to win versus trials of go to avoid loss and no go to avoid loss) on Go choices
+t.test(subset(gng_all, win_maintain == 0)$go, subset(gng_all, win_maintain == 1)$go, alternative = "two.sided", var.equal = FALSE)
+```
+

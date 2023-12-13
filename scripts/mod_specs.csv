@@ -1,0 +1,12 @@
+﻿mod_name,response,key_var,random_structure
+mod1,go,QUIC*trial_num0,(1 + trial_num0| id)
+mod2,go,go_str*QUIC*trial3,(1 + go_str + trial3| id)
+mod2_ref_go,go,go_strR*QUIC*trial3,(1 + go_strR + trial3| id)
+mod2_val,go,val_str*QUIC*trial3,(1 + val_str + trial3| id)
+mod2_val_ref_positive,go,val_strR*QUIC*trial3,(1 + val_strR + trial3| id)
+mod1_correct,correct,QUIC*trial_num0,(1 + trial_num0| id)
+mod1_correct_poly,correct,"QUIC*poly(trial_num0,2,raw=FALSE)","(1 + poly(trial_num0,2,raw=FALSE)| id)"
+mod2_correct,correct,go_str*QUIC*trial3,(1 + go_str + trial3| id)
+mod2_correct_poly,correct,"go_str*QUIC*poly(trial3,2,raw=FALSE)","(1 + go_str + poly(trial3,2,raw=FALSE)| id)"
+mod2_val_correct,correct,val_strR*QUIC*trial3,(1 + val_strR + trial3| id)
+mod2_val_correct_poly,correct,"val_str*QUIC*poly(trial3,2,raw=FALSE)","(1 + val_str + poly(trial3,2,raw=FALSE) + trial3| id)"

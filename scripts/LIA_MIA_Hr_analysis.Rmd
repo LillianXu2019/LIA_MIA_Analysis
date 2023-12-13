@@ -1,0 +1,770 @@
+---
+title: "LIA_MIA_Horizon_task_analysis"
+author: "Yuyan"
+date: "`r Sys.Date()`"
+output: html_document
+---
+note: this script was copied from EXP analysis and needs to be updated for LIA/MIA analysis. The data files are ready in the processed_data/horizon_task folder under LIA_MIA_Analysis. So I can read them in directly.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, cache=TRUE)
+```
+
+# Source
+```{r, include=FALSE}
+source('Setup.R') # this script must be run first as it will clear the environment
+```
+
+```{r, include=FALSE}
+# specify model predictors for data cleaning (i.e., missing data & standardization)
+# vars <- c('quic_total', 'standard_score', 'sparse_income_num')
+vars <- c('quic_p_mon', 'quic_p_predict', 'quic_p_env', 'quic_phy_env', 'quic_safety_sec', 'quic_total', 'standard_score', 'sparse_income_num')
+# vars <- c('quic_p_mon', 'quic_p_predict', 'quic_p_env', 'quic_phy_env', 'quic_safety_sec', 'quic_total', 'harsh', 'standard_score', 'sparse_income_num', 'kid_age', 'pss_total')
+
+source('Functions.R')
+source('ReadData.R') 
+```
+
+# Functions
+```{r, cache=TRUE, include=FALSE, message=FALSE}
+# notes: 'statistics' in the summary tables refers to 't value' in lm models and 'z value' in glmer models
+
+# covariates = "harsh + standard_score + sparse_income_num"
+# covariates = "standard_score + sparse_income_num"
+
+# quic_subscales <- c("quic_total", "quic_p_mon", "quic_p_predict", "quic_p_env", "quic_phy_env", "quic_safety_sec")
+# quic_subscales <- c("quic_total")
+
+lm_fun = function(response, key_var, data, covariates) {
+  predictors <- paste(key_var, covariates, sep = " + ")
+  formula = as.formula( paste(paste(response, "~"), predictors ) )
+  print(formula)
+  lm(formula, data = data)
+}
+glmer_fun = function(response, key_var, random_structure, data, covariates) {
+  control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+  predictors <- paste(key_var, covariates, random_structure, sep = " + ")
+  formula = as.formula( paste(paste(response, "~"), predictors ) )
+  print(formula)
+  glmer(formula, data = data, family = binomial, control = control)
+}
+lmer_fun = function(response, key_var, random_structure, data, covariates) {
+  control=lmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6),check.nobs.vs.nRE = "ignore") 
+  predictors <- paste(key_var, covariates, random_structure, sep = " + ")
+  formula = as.formula( paste(paste(response, "~"), predictors ) )
+  print(formula)
+  lmer(formula, data = data, control = control)
+}
+
+
+
+run_hr_mod <- function(quic_subscales, method, analysis) {
+  if (method == "lm") {
+    if (analysis == "directed_exploration") {
+      response <- c("total_horizon")}
+    if (analysis == "rewards") {
+      response <- c("mean_r")}
+    # EXP
+    models <- quic_subscales %>% map(lm_fun, response = response, data = hr_lm_EXP)
+    EXP_summary <- map_dfr(models, tidy) %>% filter(str_detect(term, "^quic"))
+    # LIA
+    models <- quic_subscales %>% map(lm_fun, response = response, data = hr_lm_LIA)
+    LIA_summary <- map_dfr(models, tidy) %>% filter(str_detect(term, "^quic")) %>% select(-term)
+    # join data
+    summary <- cbind(EXP_summary, LIA_summary)
+    return(summary)
+  }
+  if (method == "glmer") {
+    if (analysis == "strategic_exploration") {
+      response <- c("chose_high_info_value")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*horizon*conflict_str"))
+      random_structure = "(1 + horizon + conflict_str | id)"
+    }
+    if (analysis == "random_exploration") {
+      response <- c("chose_high_info_value")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*mean_diff_adjusted"))
+      random_structure = "(1 | id)"
+    }
+    if (analysis == "habitual_responding_uncertainty") {
+      response <- c("habitual_responding")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*fourth_choice_is_high_info_value_option"))
+      random_structure = "(1 + fourth_choice_is_high_info_value_option | id)"
+    }
+    if (analysis == "habitual_responding_reward") {
+      response <- c("habitual_responding")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*fourth_choice_is_high_mean_option"))
+      random_structure = "(1 + fourth_choice_is_high_mean_option | id)"
+    }
+    if (analysis == "fourth_choice_uncertainty") {
+      response <- c("chose_high_info_value")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*fourth_choice_is_high_info_value_option"))
+      random_structure = "(1 + fourth_choice_is_high_info_value_option | id)"
+    }
+    if (analysis == "reward_maximization") {
+      response <- c("chose_high_mean_c10_long")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*mean_diff_adjusted"))
+      random_structure = "(1 | id)"
+    }
+    # EXP
+    models <- key_var %>% map(glmer_fun, response = response, random_structure = random_structure, data = hr_glmem_EXP)
+    EXP_summary <- map_dfr(models, tidy) %>% filter(str_detect(term, "^quic")) %>% select(-c(effect, group)) 
+    # LIA
+    models <- key_var %>% map(glmer_fun, response = response, random_structure = random_structure, data = hr_glmem_LIA)
+    LIA_summary <- map_dfr(models, tidy) %>% filter(str_detect(term, "^quic")) %>% select(-c(effect, group)) %>% select(-term)
+    # join data
+    summary <- cbind(EXP_summary, LIA_summary)
+    return(summary)
+  }
+  if (method == "lmer") {
+    if (analysis == "reaction_time") {
+      response <- c("rt5")
+      key_var <- lapply(quic_subscales, function(x) paste(x, "*horizon*conflict_str"))
+      random_structure = "(1 + horizon + conflict_str | id)"
+    }
+    # EXP
+    models <- key_var %>% map(lmer_fun, response = response, random_structure = random_structure, data = hr_glmem_EXP)
+    EXP_summary <- map_dfr(models, tidy) %>% filter(str_detect(term, "^quic")) %>% select(-c(effect, group)) 
+    # LIA
+    models <- key_var %>% map(lmer_fun, response = response, random_structure = random_structure, data = hr_glmem_LIA)
+    LIA_summary <- map_dfr(models, tidy) %>% filter(str_detect(term, "^quic")) %>% select(-c(effect, group)) %>% select(-term)
+    # join data
+    summary <- cbind(EXP_summary, LIA_summary)
+    return(summary)
+  }
+}
+
+summarize_models = function(output) {
+  directed_exploration_sum <- run_hr_mod(quic_subscales, 'lm', 'directed_exploration') %>% mutate(analysis = "directed_exploration")
+  rewards_sum <- run_hr_mod(quic_subscales, 'lm', 'rewards') %>% mutate(analysis = "rewards")
+  strategic_exploration_sum <- run_hr_mod(quic_subscales, 'glmer', 'strategic_exploration') %>% mutate(analysis = "strategic_exploration")
+  random_exploration_sum <- run_hr_mod(quic_subscales, 'glmer', 'random_exploration') %>% mutate(analysis = "random_exploration")
+  habitual_responding_uncertainty_sum <- run_hr_mod(quic_subscales, 'glmer', 'habitual_responding_uncertainty') %>% mutate(analysis = "habitual_responding_uncertainty")
+  habitual_responding_reward_sum <- run_hr_mod(quic_subscales, 'glmer', 'habitual_responding_reward') %>% mutate(analysis = "habitual_responding_reward")
+  fourth_choice_uncertainty_sum <- run_hr_mod(quic_subscales, 'glmer', 'fourth_choice_uncertainty') %>% mutate(analysis = "fourth_choice_uncertainty")
+  reward_maximization_sum <- run_hr_mod(quic_subscales, 'glmer', 'reward_maximization') %>% mutate(analysis = "reward_maximization")
+  reaction_time_sum <- run_hr_mod(quic_subscales, 'lmer', 'reaction_time') %>% mutate(analysis = "reaction_time")
+  
+  model_sum <- bind_rows(directed_exploration_sum, 
+                         rewards_sum, 
+                         strategic_exploration_sum, 
+                         random_exploration_sum, 
+                         habitual_responding_uncertainty_sum, 
+                         habitual_responding_reward_sum, 
+                         fourth_choice_uncertainty_sum, 
+                         reward_maximization_sum, 
+                         reaction_time_sum)
+  
+  write.csv(model_sum, file.path(EXP_hr_dir, output))
+  
+}
+
+```
+
+# Correlations
+### EXP
+```{r}
+df_cor_EXP <- q_EXP %>% select(quic_total,standard_score,sparse_income_num,negstress,new_negstress,cdi)
+chart.Correlation(df_cor_EXP, histogram = TRUE, method = "pearson")
+
+df_cor_anx <- q_EXP %>% filter_at(vars('total_masc'),all_vars(!is.na(.))) %>% 
+  select(quic_total,standard_score,sparse_income_num,negstress,new_negstress,cdi,total_masc:sep_pan)
+chart.Correlation(df_cor_anx, histogram = TRUE, method = "pearson")
+
+df_cor_anx <- q_EXP %>% filter_at(vars('rcmas_totanxt'),all_vars(!is.na(.))) %>% 
+  select(quic_total,standard_score,sparse_income_num,negstress,new_negstress,cdi,rcmas_totanxt:liet)
+chart.Correlation(df_cor_anx, histogram = TRUE, method = "pearson")
+
+quic_scale <- q_EXP %>% select("quic_p_mon", "quic_p_predict", "quic_p_env", "quic_phy_env", "quic_safety_sec", "quic_total", "quic_use")
+chart.Correlation(quic_scale, histogram = TRUE, method = "pearson")
+```
+
+### LIA
+```{r}
+df_cor <- df_covar %>% select(quic_total,standard_score,sparse_income_num,pss_total)
+chart.Correlation(df_cor, histogram = TRUE, method = "pearson")
+
+quic_scale <- df_covar %>% select(starts_with("quic"))
+chart.Correlation(quic_scale, histogram = TRUE, method = "pearson")
+```
+
+
+# Models
+```{r}
+# prepare data
+source('PrepHrData_MF.R') # prep horizon task model free data for analysis
+# source('PrepHrData_MB.R') # prep horizon task model based data for analysis
+# source('PrepTrData.R') # prep orchard task data for analysis
+# source('PrepOSFData.R') # prep data for OSF sharing
+```
+
+```{r eval=FALSE}
+# run models
+source('Models.R')
+```
+
+##### run models
+```{r}
+# covariates <- as.character()
+
+run_models_fun <- function(study, with_control, var) {
+  
+  if (study == "EXP") {
+    control_var <- "anxiety"
+    data_lm <- hr_lm_EXP
+    data_glm <- hr_glmem_EXP
+  } else {
+    control_var <- "pss_total"
+    data_lm <- hr_lm_LIA
+    data_glm <- hr_glmem_LIA
+  }
+  
+  if (with_control == 0) {covariates = "standard_score + sparse_income_num"} 
+  else {covariates = paste0("standard_score + sparse_income_num + ", control_var)}
+  # assign(covariates, covariates, envir = .GlobalEnv)
+  print(covariates)
+  
+  for (i in 1:nrow(model_setup)) {
+    
+    var_name <- var_setup$var_name[var_setup$key_vars==var]
+    mod_name <- paste0("mod_hr_", ifelse(study == "EXP", "", "LIA_"), var_name, "_", model_setup[i, "analysis"], ifelse(with_control == 1, "_withcontrol", ""))
+    response <- model_setup[i, "response"]
+    key_var <- paste0(var, model_setup[i, "term"])
+    type     <- model_setup[i, "type"]
+    random_structure <- model_setup[i, "random_structure"]
+    
+    if (type == "lm") {mod <- lm_fun(response, key_var, data_lm, covariates)}
+    else if (type == "glmer") {mod <- glmer_fun(response, key_var, random_structure, data_glm, covariates)}
+    else if (type == "lmer") {mod <- lmer_fun(response, key_var, random_structure, data_glm, covariates)}
+    
+    assign(mod_name, mod, envir = .GlobalEnv)
+    
+    saveRDS(get(mod_name), file.path(EXP_hr_dir, paste0("models/", mod_name, ".rds")))
+  }
+}
+```
+
+```{r eval=FALSE}
+# run models
+analysis <- c("directed_exploration", "rewards", "strategic_exploration", "habitual_responding_info", "habitual_responding_reward", "habitual_responding", "fourth_choice", "reward_maximization",  "reaction_time", "reaction_time_info", "reaction_time_reward")
+type <- c("lm", "lm", "glmer", "glmer", "glmer", "glmer", "glmer", "glmer", "lmer", "lmer", "lmer")
+response <- c("total_horizon", "mean_r", "chose_high_info_value", "habitual_responding", "habitual_responding", "chose_high_info_value", "chose_high_info_value", "chose_high_mean_c10_long", "rt5", "rt5", "rt5")
+term <- c("", "", "*horizon*conflict_str", "*fourth_choice_is_high_info_value_option", "*fourth_choice_is_high_mean_option", "*habitual_responding", "*fourth_choice_is_high_info_value_option", "*mean_diff_adjusted", "*horizon*conflict_str", "*fourth_choice_is_high_info_value_option", "*fourth_choice_is_high_mean_option")
+random_structure <-c(NA, NA, "(1 + horizon + conflict_str | id)", "(1 + fourth_choice_is_high_info_value_option | id)", "(1 + fourth_choice_is_high_mean_option | id)", "(1 + habitual_responding|id)", "(1 + fourth_choice_is_high_info_value_option | id)", "(1 | id)", "(1 + horizon + conflict_str | id)", "(1 + fourth_choice_is_high_info_value_option|id)", "(1 + fourth_choice_is_high_mean_option|id)")
+model_setup <- data.frame(analysis, type, response, term, random_structure)
+
+var_name <- c('mon', 'pred', 'env', 'phys', 'safe', 'quic', 'le')
+key_vars <- c('quic_p_mon', 'quic_p_predict', 'quic_p_env', 'quic_phy_env', 'quic_safety_sec', 'quic_total', 'new_negstress')
+var_setup <- data.frame(var_name, key_vars)
+
+var_name <- c('mon')
+key_vars <- c('quic_p_mon')
+var_setup <- data.frame(var_name, key_vars)
+
+key_vars %>% map(run_models_fun, study = "EXP", with_control = 0)
+key_vars %>% map(run_models_fun, study = "EXP", with_control = 1)
+
+head(key_vars, -1) %>% map(run_models_fun, study = "LIA", with_control = 0)
+head(key_vars, -1) %>% map(run_models_fun, study = "LIA", with_control = 1)
+```
+
+##### read in models
+```{r}
+
+# Make a vector of all your file paths
+file_paths <- list.files(path = file.path(EXP_hr_dir, "models"), pattern = "\\.rds", full.names = TRUE)
+
+# Make a vector of file names
+file_names <-  gsub(pattern = "\\.rds$", replacement = "", x = basename(file_paths))
+
+# Read all your data into a list
+data_list <- lapply(file_paths, readRDS)
+
+# Assign file names to list elements
+names(data_list) <- file_names      
+```
+
+##### summarize models
+```{r}
+# note: need to use different arguments for lm, glmer, and lmer models
+# lm & lmer: conf.int = TRUE
+# glmer: conf.int = TRUE, exp = TRUE (to obtain odds ratios)
+# for the interpretation of regresion df and residual df, refer to this source:
+# https://www.freecodecamp.org/news/https-medium-com-sharadvm-how-to-read-a-regression-table-661d391e9bd7-708e75efc560/#:~:text=Residual%20df%20is%20the%20total,number%20of%20variables%20being%20estimated.
+
+tidy_mod_fun <- function(model_list) {
+  for (i in (1:length(model_list))) {
+    name <- names(model_list)[[i]]
+    mod <- model_list[[i]]
+    
+    if (str_detect(name, "LIA")) {study = "LIA"} else {study = "EXP"}
+    if (str_detect(name, "control")) {withcontrol = TRUE} else {withcontrol = FALSE}
+    
+    if (class(mod) == "glmerMod") {
+      tibble <- mod %>% tidy(conf.int = TRUE, exp = TRUE) 
+    } else {
+      tibble <- mod %>% tidy(conf.int = TRUE)
+    }
+    
+    if(class(mod) == "lm") {
+      df1 <- glance(data_list[[i]])$df
+      df2 <- glance(data_list[[i]])$df.residual
+    } else {
+      df1 <- NA 
+      df2 <- NA}
+    
+    tibble <- tibble %>% mutate(study = study, name = name, withcontrol = withcontrol, df1 = df1, df2 = df2)
+    
+    summary <- bind_rows(summary, tibble)
+  }
+  return(summary)
+}
+
+
+summary <- tibble()
+summary <- tidy_mod_fun(data_list) %>% filter(!is.na(std.error)) %>% select(-c(effect, group, df))
+```
+
+##### subscales
+```{r}
+extract_keyterms_fun <- function(vars) {
+  table <- tibble()
+  
+  for (i in 1:length(vars)) {
+    var = vars[[i]]
+    
+    for (i in 1:nrow(model_setup)) {
+      if (model_setup$term[[i]] == "") {coef = var} 
+      else {coef = model_setup$term[[i]] %>% str_replace_all("\\*", ":") %>% paste0(var, .)}
+      
+      analysis = model_setup$analysis[[i]]
+      if (analysis == "strategic_exploration") {
+        parts <- str_split(coef, ":", simplify = TRUE)
+        coef <- c(paste0(parts[[1]],  ":", parts[[2]]), 
+                  paste0(parts[[1]],  ":", parts[[3]]), 
+                  paste0(parts[[1]],":",parts[[2]],":",parts[[3]]))
+      }
+      print(coef)
+      
+      table_tmp <- summary %>% 
+        filter(str_detect(name, analysis)) %>% 
+        filter(str_detect(term, coef))
+      
+      table <- rbind(table, table_tmp)
+    }
+  }
+  return (table)
+}
+
+summary_subscales <- extract_keyterms_fun(key_vars)
+```
+
+```{r}
+# subset based on model types and with_control
+multiple_correction_fun <- function(analysis, with_control, negate_LIA = TRUE) {
+  tmp <- summary_subscales %>% 
+    filter(str_detect(name, analysis) & 
+             withcontrol == with_control & 
+             str_detect(name, "LIA", negate = negate_LIA)) %>% 
+    mutate(adjusted_ps = round(p.adjust(p.value, "BH"), 3)) %>% 
+    select(name, adjusted_ps, everything())
+  
+  return(tmp)
+}
+
+subscales_EXP <- model_setup$analysis %>% map(multiple_correction_fun, with_control = FALSE, negate_LIA = TRUE)
+subscales_LIA <- model_setup$analysis %>% map(multiple_correction_fun, with_control = FALSE, negate_LIA = FALSE)
+```
+
+##### EXP -- life event scale
+# sample glmer models
+```{r}
+### habitual responding guided by information 
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_habitual_responding_info <- glmer(habitual_responding ~ fourth_choice_is_high_info_value_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option |id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_habitual_responding_info, file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding_info.rds"))
+
+### habitual responding guided by reward
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_habitual_responding_reward <- glmer(habitual_responding ~ fourth_choice_is_high_mean_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_mean_option|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_habitual_responding_reward, file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding_reward.rds"))
+
+### strategic exploration & temporal discounting
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_strategic_exploration <- glmer(chose_high_info_value ~ horizon*conflict_str*new_negstress + standard_score + sparse_income_num + (1 + horizon + conflict_str|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_strategic_exploration, file.path(EXP_hr_dir, "models/mod_hr_le_strategic_exploration.rds"))
+
+### reward maximization and task understanding (chose the high mean option at c10 as a function of reward differential)
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_success <- glmer(chose_high_mean_c10_long ~ mean_diff_adjusted*new_negstress + standard_score + sparse_income_num + (1 + mean_diff_adjusted|id), data = hr_glmem_EXP, family = binomial, control = control, na.action = na.omit)
+saveRDS(mod_hr_le_success, file.path(EXP_hr_dir, "models/mod_hr_le_success.rds"))
+```
+
+```{r eval=FALSE}
+### quic and directed exploration
+mod_hr_le_directed_exploration <- lm(total_horizon ~ new_negstress + standard_score + sparse_income_num, data = hr_lm_EXP)
+saveRDS(mod_hr_le_directed_exploration, file.path(EXP_hr_dir, "models/mod_hr_le_directed_exploration.rds"))
+
+### quic and rewards gained
+mod_hr_le_rewards <- lm(mean_r ~ new_negstress + standard_score + sparse_income_num, data = hr_lm_EXP)
+saveRDS(mod_hr_le_rewards, file.path(EXP_hr_dir, "models/mod_hr_le_rewards.rds"))
+
+### strategic exploration & temporal discounting
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_strategic_exploration <- glmer(chose_high_info_value ~ horizon*conflict_str*new_negstress + standard_score + sparse_income_num + (1 + horizon + conflict_str|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_strategic_exploration, file.path(EXP_hr_dir, "models/mod_hr_le_strategic_exploration.rds"))
+
+### habitual responding guided by information 
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_habitual_responding_info <- glmer(habitual_responding ~ fourth_choice_is_high_info_value_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option |id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_habitual_responding_info, file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding_info.rds"))
+
+### habitual responding guided by reward
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_habitual_responding_reward <- glmer(habitual_responding ~ fourth_choice_is_high_mean_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_mean_option|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_habitual_responding_reward, file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding_reward.rds"))
+
+### exploration modulated by habitual responding
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_habitual_responding <- glmer(chose_high_info_value ~ habitual_responding*new_negstress + standard_score + sparse_income_num + (1 + habitual_responding|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_habitual_responding, file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding.rds"))
+
+### exploration modulated by whether the fourth choice is on the uncertain side
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_fourth_choice <- glmer(chose_high_info_value ~ fourth_choice_is_high_info_value_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_le_fourth_choice, file.path(EXP_hr_dir, "models/mod_hr_le_fourth_choice.rds"))
+
+### reward maximization and task understanding (chose the high mean option at c10 as a function of reward differential)
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_le_success <- glmer(chose_high_mean_c10_long ~ mean_diff_adjusted*new_negstress + standard_score + sparse_income_num + (1 + mean_diff_adjusted|id), data = hr_glmem_EXP, family = binomial, control = control, na.action = na.omit)
+saveRDS(mod_hr_le_success, file.path(EXP_hr_dir, "models/mod_hr_le_success.rds"))
+
+### overall reaction time (impulsivity)
+control=lmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6),check.nobs.vs.nRE = "ignore") 
+mod_hr_le_reaction_time1 <- lmer(rt5 ~ horizon*conflict_str*new_negstress + standard_score + sparse_income_num + (1 + horizon + conflict_str|id), data = hr_glmem_EXP, control = control)
+saveRDS(mod_hr_le_reaction_time1, file.path(EXP_hr_dir, "models/mod_hr_le_reaction_time1.rds"))
+
+### reaction time for info-guided habitual responding 
+control=lmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6),check.nobs.vs.nRE = "ignore") 
+mod_hr_le_reaction_time2 <- lmer(rt5 ~ fourth_choice_is_high_info_value_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option|id), data = hr_glmem_EXP, control = control)
+saveRDS(mod_hr_le_reaction_time2, file.path(EXP_hr_dir, "models/mod_hr_le_reaction_time2.rds"))
+
+### reaction time for reward-guided habitual responding 
+control=lmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6),check.nobs.vs.nRE = "ignore") 
+mod_hr_le_reaction_time3 <- lmer(rt5 ~ fourth_choice_is_high_mean_option*new_negstress + standard_score + sparse_income_num + (1 + fourth_choice_is_high_mean_option|id), data = hr_glmem_EXP, control = control)
+saveRDS(mod_hr_le_reaction_time3, file.path(EXP_hr_dir, "models/mod_hr_le_reaction_time3.rds"))
+
+
+
+### habitual responding guided by information or reward
+# control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+# mod_hr_le_habitual_responding_info_reward <- glmer(habitual_responding ~ fourth_choice_is_high_info_value_option*fourth_choice_is_high_mean_option*new_negstress + standard_score + sparse_income_num + (1|id), data = hr_glmem, family = binomial, control = control)
+
+### random exploration
+# control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+# mod_hr_le_random_exploration <- glmer(chose_high_info_value ~ mean_diff_adjusted*new_negstress + standard_score + sparse_income_num + (1 + mean_diff_adjusted|id), data = hr_glmem_EXP, family = binomial, control = control)
+# saveRDS(mod_hr_le_random_exploration, file.path(EXP_hr_dir, "models/mod_hr_le_random_exploration.rds"))
+```
+
+##### EXP -- control for anxiety
+```{r eval=FALSE}
+### quic and directed exploration
+mod_hr_anx_directed_exploration <- lm(total_horizon ~ quic_total + anxiety + standard_score + sparse_income_num, data = hr_lm_EXP)
+saveRDS(mod_hr_anx_directed_exploration, file.path(EXP_hr_dir, "models/mod_hr_anx_directed_exploration.rds"))
+
+### quic and rewards gained
+mod_hr_anx_rewards <- lm(mean_r ~ quic_total + anxiety + standard_score + sparse_income_num, data = hr_lm_EXP)
+saveRDS(mod_hr_anx_rewards, file.path(EXP_hr_dir, "models/mod_hr_anx_rewards.rds"))
+
+### exploration modulated by whether the fourth choice is on the uncertain side
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_anx_fourth_choice <- glmer(chose_high_info_value ~ fourth_choice_is_high_info_value_option*quic_total + anxiety + standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_anx_fourth_choice, file.path(EXP_hr_dir, "models/mod_hr_anx_fourth_choice.rds"))
+
+### exploration modulated by habitual responding
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_anx_habitual_responding <- glmer(chose_high_info_value ~ habitual_responding*quic_total + anxiety + standard_score + sparse_income_num + (1 + habitual_responding|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_anx_habitual_responding, file.path(EXP_hr_dir, "models/mod_hr_anx_habitual_responding.rds"))
+
+### habitual responding guided by information 
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_anx_habitual_responding_info <- glmer(habitual_responding ~ fourth_choice_is_high_info_value_option*quic_total + anxiety + standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option |id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_anx_habitual_responding_info, file.path(EXP_hr_dir, "models/mod_hr_anx_habitual_responding_info.rds"))
+
+### habitual responding guided by reward
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_anx_habitual_responding_reward <- glmer(habitual_responding ~ fourth_choice_is_high_mean_option*quic_total + anxiety + standard_score + sparse_income_num + (1 + fourth_choice_is_high_mean_option|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_anx_habitual_responding_reward, file.path(EXP_hr_dir, "models/mod_hr_anx_habitual_responding_reward.rds"))
+
+### strategic exploration & temporal discounting
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_anx_strategic_exploration <- glmer(chose_high_info_value ~ horizon*conflict_str*quic_total + anxiety + standard_score + sparse_income_num + (1 + horizon + conflict_str|id), data = hr_glmem_EXP, family = binomial, control = control)
+saveRDS(mod_hr_anx_strategic_exploration, file.path(EXP_hr_dir, "models/mod_hr_anx_strategic_exploration.rds"))
+
+### reward maximization and task understanding (chose the high mean option at c10 as a function of reward differential)
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_hr_anx_success <- glmer(chose_high_mean_c10_long ~ mean_diff_adjusted*quic_total + anxiety + standard_score + sparse_income_num + (1 + mean_diff_adjusted|id), data = hr_glmem_EXP, family = binomial, control = control, na.action = na.omit)
+saveRDS(mod_hr_anx_success, file.path(EXP_hr_dir, "models/mod_hr_anx_success.rds"))
+```
+
+##### LIA -- control for PSS
+```{r eval=FALSE}
+### quic and directed exploration
+mod_LIA_hr_pss_directed_exploration <- lm(total_horizon ~ quic_total + pss_total + standard_score + sparse_income_num, data = hr_lm_LIA)
+saveRDS(mod_LIA_hr_pss_directed_exploration, file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_directed_exploration.rds"))
+
+### quic and rewards gained
+mod_LIA_hr_pss_rewards <- lm(mean_r ~ quic_total + pss_total + standard_score + sparse_income_num, data = hr_lm_LIA)
+saveRDS(mod_LIA_hr_pss_rewards, file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_rewards.rds"))
+
+### habitual responding guided by information 
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_LIA_hr_pss_habitual_responding_info <- glmer(habitual_responding ~ fourth_choice_is_high_info_value_option*quic_total + pss_total +  standard_score + sparse_income_num + (1 + fourth_choice_is_high_info_value_option |id), data = hr_glmem_LIA, family = binomial, control = control)
+saveRDS(mod_LIA_hr_pss_habitual_responding_info, file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_habitual_responding_info.rds"))
+
+### habitual responding guided by reward
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_LIA_hr_pss_habitual_responding_reward <- glmer(habitual_responding ~ fourth_choice_is_high_mean_option*quic_total + pss_total + standard_score + sparse_income_num + (1 + fourth_choice_is_high_mean_option|id), data = hr_glmem_LIA, family = binomial, control = control)
+saveRDS(mod_LIA_hr_pss_habitual_responding_reward, file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_habitual_responding_reward.rds"))
+
+### strategic exploration
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_LIA_hr_pss_strategic_exploration <- glmer(chose_high_info_value ~ horizon*conflict_str*quic_total + pss_total + standard_score + sparse_income_num + (1 + horizon + conflict_str|id), data = hr_glmem_LIA, family = binomial, control = control)
+saveRDS(mod_LIA_hr_pss_strategic_exploration, file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_strategic_exploration.rds"))
+
+### reward maximization and task understanding (chose the high mean option at c10 as a function of reward differential)
+control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))
+mod_LIA_hr_pss_success <- glmer(chose_high_mean_c10_long ~ mean_diff_adjusted*quic_total + pss_total + standard_score + sparse_income_num + (1 + mean_diff_adjusted|id), data = hr_glmem_LIA, family = binomial, control = control, na.action = na.omit)
+saveRDS(mod_LIA_hr_pss_success, file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_success.rds"))
+
+### overall reaction time (impulsivity)
+control=lmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6),check.nobs.vs.nRE = "ignore") 
+mod_LIA_hr_pss_reaction_time1 <- lmer(rt5 ~ horizon*conflict_str*quic_total + pss_total + standard_score + sparse_income_num + (1 + horizon + conflict_str|id), data = hr_glmem_LIA, control = control)
+saveRDS(mod_LIA_hr_pss_reaction_time1, file.path(EXP_hr_dir, "models/mod_LIA_hr_pss_reaction_time1.rds"))
+```
+
+# Outputs 
+##### EXP
+```{r}
+print("QUIC & directed exploration")
+mod_hr_directed_exploration <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_directed_exploration.rds"))
+sjPlot::tab_model(mod_hr_directed_exploration, file = file.path(EXP_hr_dir,"plots/mod_hr_directed_exploration.doc"))
+# summary(mod_hr_directed_exploration)
+
+print("QUIC & strategic exploration, temporal discounting")
+mod_hr_strategic_exploration <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_strategic_exploration.rds"))
+sjPlot::tab_model(mod_hr_strategic_exploration, file = file.path(EXP_hr_dir,"plots/mod_hr_strategic_exploration.doc"))
+# summary(mod_hr_strategic_exploration)
+
+print("QUIC & habitual responding guided by information")
+mod_hr_habitual_responding_info <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_habitual_responding_info.rds"))
+sjPlot::tab_model(mod_hr_habitual_responding_info, file = file.path(EXP_hr_dir,"plots/mod_hr_habitual_responding_info.doc"))
+# summary(mod_hr_habitual_responding_info)
+
+print("QUIC & habitual responding guided by reward")
+mod_hr_habitual_responding_reward <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_habitual_responding_reward.rds"))
+sjPlot::tab_model(mod_hr_habitual_responding_reward, file = file.path(EXP_hr_dir,"plots/mod_hr_habitual_responding_reward.doc"))
+# summary(mod_hr_habitual_responding_reward)
+
+print("QUIC & rewards gained")
+mod_hr_rewards <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_rewards.rds"))
+sjPlot::tab_model(mod_hr_rewards, file = file.path(EXP_hr_dir,"plots/mod_hr_rewards.doc"))
+# summary(mod_hr_rewards)
+
+print("QUIC & reward maximization and task understanding")
+mod_hr_success <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_success.rds"))
+sjPlot::tab_model(mod_hr_success, file = file.path(EXP_hr_dir,"plots/mod_hr_success.doc"))
+# summary(mod_hr_success)
+
+print("QUIC & overall reaction time")
+mod_hr_reaction_time1 <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_reaction_time1.rds"))
+sjPlot::tab_model(mod_hr_reaction_time1, file = file.path(EXP_hr_dir,"plots/mod_hr_reaction_time1.doc"))
+# summary(mod_hr_reaction_time1)
+
+```
+
+##### EXP -- life event scale
+```{r}
+print("LE & directed exploration")
+
+assign(paste0("mod_hr_directed_exploration", "_le"))
+
+
+mod_hr_le_directed_exploration <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_directed_exploration.rds"))
+# sjPlot::tab_model(mod_hr_le_directed_exploration)
+sjPlot::tab_model(mod_hr_le_directed_exploration, file = file.path(EXP_hr_dir,"plots/mod_hr_le_directed_exploration.doc"))
+# summary(mod_hr_le_directed_exploration)
+
+print("LE & strategic exploration, temporal discounting")
+mod_hr_le_strategic_exploration <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_strategic_exploration.rds"))
+# sjPlot::tab_model(mod_hr_le_strategic_exploration)
+sjPlot::tab_model(mod_hr_le_strategic_exploration, file = file.path(EXP_hr_dir,"plots/mod_hr_le_strategic_exploration.doc"))
+# summary(mod_hr_le_strategic_exploration)
+
+print("LE & habitual responding guided by information")
+mod_hr_le_habitual_responding_info <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding_info.rds"))
+# sjPlot::tab_model(mod_hr_le_habitual_responding_info)
+sjPlot::tab_model(mod_hr_le_habitual_responding_info, file = file.path(EXP_hr_dir,"plots/mod_hr_le_habitual_responding_info.doc"))
+# summary(mod_hr_le_habitual_responding_info)
+
+print("LE & habitual responding guided by reward")
+mod_hr_le_habitual_responding_reward <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_habitual_responding_reward.rds"))
+# sjPlot::tab_model(mod_hr_le_habitual_responding_reward)
+sjPlot::tab_model(mod_hr_le_habitual_responding_reward, file = file.path(EXP_hr_dir,"plots/mod_hr_le_habitual_responding_reward.doc"))
+# summary(mod_hr_le_habitual_responding_reward)
+
+print("LE & rewards gained")
+mod_hr_le_rewards <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_rewards.rds"))
+# sjPlot::tab_model(mod_hr_le_rewards)
+sjPlot::tab_model(mod_hr_le_rewards, file = file.path(EXP_hr_dir,"plots/mod_hr_le_rewards.doc"))
+# summary(mod_hr_le_rewards)
+
+print("LE & reward maximization and task understanding")
+mod_hr_le_success <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_success.rds"))
+# sjPlot::tab_model(mod_hr_le_success)
+sjPlot::tab_model(mod_hr_le_success, file = file.path(EXP_hr_dir,"plots/mod_hr_le_success.doc"))
+# summary(mod_hr_le_success)
+
+print("LE & overall reaction time")
+mod_hr_le_reaction_time1 <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_le_reaction_time1.rds"))
+# sjPlot::tab_model(mod_hr_le_reaction_time1)
+sjPlot::tab_model(mod_hr_le_reaction_time1, file = file.path(EXP_hr_dir,"plots/mod_hr_le_reaction_time1.doc"))
+# summary(mod_hr_le_reaction_time1)
+
+```
+
+##### EXP -- control for anxiety
+```{r}
+print("QUIC & directed exploration, control for anxiety")
+mod_hr_anx_directed_exploration <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_directed_exploration.rds"))
+# sjPlot::tab_model(mod_hr_anx_directed_exploration)
+sjPlot::tab_model(mod_hr_anx_directed_exploration, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_directed_exploration.doc"))
+# summary(mod_hr_anx_directed_exploration)
+
+print("QUIC & strategic exploration, temporal discounting, control for anxiety")
+mod_hr_anx_strategic_exploration <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_strategic_exploration.rds"))
+# sjPlot::tab_model(mod_hr_anx_strategic_exploration)
+sjPlot::tab_model(mod_hr_anx_strategic_exploration, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_strategic_exploration.doc"))
+# summary(mod_hr_anx_strategic_exploration)
+
+print("QUIC & habitual responding guided by information, control for anxiety")
+mod_hr_anx_habitual_responding_info <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_habitual_responding_info.rds"))
+# sjPlot::tab_model(mod_hr_anx_habitual_responding_info)
+sjPlot::tab_model(mod_hr_anx_habitual_responding_info, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_habitual_responding_info.doc"))
+# summary(mod_hr_anx_habitual_responding_info)
+
+print("QUIC & habitual responding guided by reward, control for anxiety")
+mod_hr_anx_habitual_responding_reward <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_habitual_responding_reward.rds"))
+# sjPlot::tab_model(mod_hr_anx_habitual_responding_reward)
+sjPlot::tab_model(mod_hr_anx_habitual_responding_reward, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_habitual_responding_reward.doc"))
+# summary(mod_hr_anx_habitual_responding_reward)
+
+print("QUIC & rewards gained, control for anxiety")
+mod_hr_anx_rewards <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_rewards.rds"))
+# sjPlot::tab_model(mod_hr_anx_rewards)
+sjPlot::tab_model(mod_hr_anx_rewards, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_rewards.doc"))
+# summary(mod_hr_anx_rewards)
+
+print("QUIC & reward maximization and task understanding, control for anxiety")
+mod_hr_anx_success <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_success.rds"))
+# sjPlot::tab_model(mod_hr_anx_success)
+sjPlot::tab_model(mod_hr_anx_success, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_success.doc"))
+# summary(mod_hr_anx_success)
+
+# print("QUIC & overall reaction time, control for anxiety")
+# mod_hr_anx_reaction_time1 <- read_rds(file.path(EXP_hr_dir, "models/mod_hr_anx_reaction_time1.rds"))
+# sjPlot::tab_model(mod_hr_anx_reaction_time1)
+# sjPlot::tab_model(mod_hr_anx_reaction_time1, file = file.path(EXP_hr_dir,"plots/mod_hr_anx_reaction_time1.doc"))
+# summary(mod_hr_anx_reaction_time1)
+
+```
+
+##### LIA
+```{r}
+print("QUIC & directed exploration")
+mod_LIA_hr_directed_exploration <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_directed_exploration.rds"))
+# sjPlot::tab_model(mod_LIA_hr_directed_exploration)
+sjPlot::tab_model(mod_LIA_hr_directed_exploration, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_directed_exploration.doc"))
+# summary(mod_LIA_hr_directed_exploration)
+
+print("QUIC & strategic exploration, temporal discounting")
+mod_LIA_hr_strategic_exploration <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_strategic_exploration.rds"))
+# sjPlot::tab_model(mod_LIA_hr_strategic_exploration)
+sjPlot::tab_model(mod_LIA_hr_strategic_exploration, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_strategic_exploration.doc"))
+# summary(mod_LIA_hr_strategic_exploration)
+
+print("QUIC & habitual responding guided by information")
+mod_LIA_hr_habitual_responding_info <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_habitual_responding_info.rds"))
+# sjPlot::tab_model(mod_LIA_hr_habitual_responding_info)
+sjPlot::tab_model(mod_LIA_hr_habitual_responding_info, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_habitual_responding_info.doc"))
+# summary(mod_LIA_hr_habitual_responding_info)
+
+print("QUIC & habitual responding guided by reward")
+mod_LIA_hr_habitual_responding_reward <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_habitual_responding_reward.rds"))
+# sjPlot::tab_model(mod_LIA_hr_habitual_responding_reward)
+sjPlot::tab_model(mod_LIA_hr_habitual_responding_reward, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_habitual_responding_reward.doc"))
+# summary(mod_LIA_hr_habitual_responding_reward)
+
+print("QUIC & rewards gained")
+mod_LIA_hr_rewards <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_rewards.rds"))
+# sjPlot::tab_model(mod_LIA_hr_rewards)
+sjPlot::tab_model(mod_LIA_hr_rewards, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_rewards.doc"))
+# summary(mod_LIA_hr_rewards)
+
+print("QUIC & reward maximization and task understanding")
+mod_LIA_hr_success <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_success.rds"))
+# sjPlot::tab_model(mod_LIA_hr_success)
+sjPlot::tab_model(mod_LIA_hr_success, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_success.doc"))
+# summary(mod_LIA_hr_success)
+
+print("QUIC & overall reaction time")
+mod_LIA_hr_reaction_time1 <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_reaction_time1.rds"))
+# sjPlot::tab_model(mod_LIA_hr_reaction_time1)
+sjPlot::tab_model(mod_LIA_hr_reaction_time1, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_reaction_time1.doc"))
+# summary(mod_LIA_hr_reaction_time1)
+
+```
+
+##### LIA -- control for PSS
+```{r}
+print("QUIC & directed exploration, control for PSS")
+mod_LIA_hr_pss_directed_exploration <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_directed_exploration.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_directed_exploration)
+sjPlot::tab_model(mod_LIA_hr_pss_directed_exploration, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_directed_exploration.doc"))
+# summary(mod_LIA_hr_pss_directed_exploration)
+
+print("QUIC & strategic exploration, temporal discounting, control for PSS")
+mod_LIA_hr_pss_strategic_exploration <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_strategic_exploration.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_strategic_exploration)
+sjPlot::tab_model(mod_LIA_hr_pss_strategic_exploration, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_strategic_exploration.doc"))
+# summary(mod_LIA_hr_pss_strategic_exploration)
+
+print("QUIC & habitual responding guided by information, control for PSS")
+mod_LIA_hr_pss_habitual_responding_info <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_habitual_responding_info.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_habitual_responding_info)
+sjPlot::tab_model(mod_LIA_hr_pss_habitual_responding_info, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_habitual_responding_info.doc"))
+# summary(mod_LIA_hr_pss_habitual_responding_info)
+
+print("QUIC & habitual responding guided by reward, control for PSS")
+mod_LIA_hr_pss_habitual_responding_reward <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_habitual_responding_reward.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_habitual_responding_reward)
+sjPlot::tab_model(mod_LIA_hr_pss_habitual_responding_reward, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_habitual_responding_reward.doc"))
+# summary(mod_LIA_hr_pss_habitual_responding_reward)
+
+print("QUIC & rewards gained, control for PSS")
+mod_LIA_hr_pss_rewards <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_rewards.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_rewards)
+sjPlot::tab_model(mod_LIA_hr_pss_rewards, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_rewards.doc"))
+# summary(mod_LIA_hr_pss_rewards)
+
+print("QUIC & reward maximization and task understanding, control for PSS")
+mod_LIA_hr_pss_success <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_success.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_success)
+sjPlot::tab_model(mod_LIA_hr_pss_success, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_success.doc"))
+# summary(mod_LIA_hr_pss_success)
+
+print("QUIC & overall reaction time, control for PSS")
+mod_LIA_hr_pss_reaction_time1 <- read_rds(file.path(LIA_hr_dir, "models/mod_LIA_hr_pss_reaction_time1.rds"))
+# sjPlot::tab_model(mod_LIA_hr_pss_reaction_time1)
+sjPlot::tab_model(mod_LIA_hr_pss_reaction_time1, file = file.path(LIA_hr_dir,"plots/mod_LIA_hr_pss_reaction_time1.doc"))
+# summary(mod_LIA_hr_pss_reaction_time1)
+
+```
